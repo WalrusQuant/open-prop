@@ -1104,7 +1104,7 @@ mod tests {
             minutes: Some(32.0),
         };
         let original = predict_spot(&fitted, &games, &spot, "last_10", 15.0).unwrap();
-        let directory = std::env::temp_dir().join(format!("open-trend-bayes-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("open-prop-bayes-{}", std::process::id()));
         save_model(&fitted, "2026-10-07T18:00:00Z", &directory).unwrap();
         let loaded = load_model(&directory, "points").unwrap();
         let again = predict_spot(&loaded, &games, &spot, "last_10", 15.0).unwrap();
@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn an_old_tree_file_asks_for_a_refit() {
-        let directory = std::env::temp_dir().join(format!("open-trend-old-{}", std::process::id()));
+        let directory = std::env::temp_dir().join(format!("open-prop-old-{}", std::process::id()));
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
             directory.join("points.json"),

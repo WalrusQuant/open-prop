@@ -1,6 +1,6 @@
-# Open Trend
+# Open Prop
 
-Open Trend is a desktop app for NBA game logs. It shows how often a player cleared a number you pick, and it fits one rate-per-minute model per stat for the season. The model is there so you can read a probability and change the priors. It does not claim an edge against a book.
+Open Prop is a desktop app for NBA game logs. It shows how often a player cleared a number you pick, and it fits one rate-per-minute model per stat for the season. The model is there so you can read a probability and change the priors. It does not claim an edge against a book.
 
 There is no odds feed, no American price, no implied probability, and no edge. A line is just the number you typed.
 
@@ -107,6 +107,8 @@ The database uses WAL mode. On macOS it lives at:
 ```text
 ~/Library/Application Support/com.opentrend.desk/open-trend.db
 ```
+
+The folder is still `com.opentrend.desk`, and the database file is still `open-trend.db`. An install from before the rename keeps the cache and the fitted models.
 
 Fitted models are JSON files in the `models` folder next to that database. One file per stat. The browser preview at `pnpm dev` uses invented names. It does not call the NBA API, and it cannot train.
 

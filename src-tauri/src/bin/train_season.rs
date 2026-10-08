@@ -13,7 +13,7 @@ fn main() {
     let season_type = std::env::args()
         .nth(3)
         .unwrap_or_else(|| "Regular Season".to_string());
-    let report = open_trend_lib::train_cached(&db, &season, &season_type)
+    let report = open_prop_lib::train_cached(&db, &season, &season_type)
         .unwrap_or_else(|error| panic!("{error}"));
     println!(
         "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",

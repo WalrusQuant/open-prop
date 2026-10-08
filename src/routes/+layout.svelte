@@ -39,7 +39,7 @@
 <div class="app">
   <header class="mast">
     <div class="brand">
-      <a class="word" href="/">Open Trend</a>
+      <a class="word" href="/">Open Prop</a>
       <nav>
         <a href="/" aria-current={path === "/" ? "page" : undefined}>Home</a>
         <a href="/player" aria-current={path === "/player" ? "page" : undefined}>Player</a>

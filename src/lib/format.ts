@@ -118,7 +118,7 @@ export function downloadCsv(report: TrendReport) {
   const link = document.createElement("a");
   const slug = report.playerName.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   link.href = url;
-  link.download = `open-trend-${slug}-${report.stat}-${report.window}.csv`;
+  link.download = `open-prop-${slug}-${report.stat}-${report.window}.csv`;
   link.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }

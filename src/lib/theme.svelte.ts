@@ -1,9 +1,10 @@
-const KEY = "open-trend-theme";
+const KEY = "open-prop-theme";
+const LEGACY_KEY = "open-trend-theme";
 
 export const theme = $state({ mode: "light" as "light" | "dark" });
 
 export function initTheme() {
-  const stored = localStorage.getItem(KEY);
+  const stored = localStorage.getItem(KEY) ?? localStorage.getItem(LEGACY_KEY);
   if (stored === "light" || stored === "dark") theme.mode = stored;
   else theme.mode = window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
   document.documentElement.dataset.theme = theme.mode;

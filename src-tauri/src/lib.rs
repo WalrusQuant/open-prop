@@ -37,5 +37,5 @@ pub fn run() {
             commands::model_scores
         ])
         .run(tauri::generate_context!())
-        .expect("Open Trend failed to start");
+        .expect("Open Prop failed to start");
 }

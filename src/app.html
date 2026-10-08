@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Open Trend</title>
+    <title>Open Prop</title>
     <link rel="icon" href="/favicon.png" />
     <script>
       try {
-        const stored = localStorage.getItem("open-trend-theme");
+        const stored = localStorage.getItem("open-prop-theme") || localStorage.getItem("open-trend-theme");
         const dark =
           stored === "dark" ||
           (!stored && window.matchMedia("(prefers-color-scheme: dark)").matches);

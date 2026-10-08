@@ -1,4 +1,4 @@
-# Open Trend
+# Open Prop
 
 ## Build
 

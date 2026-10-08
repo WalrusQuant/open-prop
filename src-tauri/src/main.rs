@@ -1,5 +1,5 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    open_trend_lib::run()
+    open_prop_lib::run()
 }
