@@ -98,7 +98,7 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     player's team is the roster team and a waived player stays listed as "Not on a roster" (the
     board leaves him out). If that call fails, the stored roster is kept. Playoffs ask
     leaguestandingsv3 for clinched and play-in teams; once playoff games are cached those teams
-    are the list. With no games yet, the trend says so and shows last season's hit rate, labelled.
+    are the list, and a team with four losses in a series drops out. With no games yet, the trend says so and shows last season's hit rate, labelled.
     On each carried player's first game of 2025-26, the carry cut points log loss from 5.83 to
     3.31 against the role prior alone.
   </p>
