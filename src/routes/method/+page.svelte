@@ -86,7 +86,7 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     opponents, home, and rest, and capped at 1,000 pseudo-minutes. A starter's own games outweigh
     that after about 30 games, and the carry also fades as this season's minutes grow. Until then the player page says "Prior from" that season. His
     minutes start from last season's average, counted as three games. Each opponent multiplier
-    starts from last season's, pulled toward 1. A rookie keeps the role prior. A traded player keeps
+    starts from last season's, pulled toward 1. A rookie keeps the role prior and waits for five games; a draft×role prior was tried and did not beat that. A traded player keeps
     his own carry, because the multipliers belong to opponents, not teammates. A player with carry
     can be priced before his first game. Everyone else waits for five. The cap came from a backtest
     on the first 10 team games of the last two seasons, where every game was predicted from earlier

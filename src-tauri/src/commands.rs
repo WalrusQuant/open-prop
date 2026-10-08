@@ -688,6 +688,86 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
     })
 }
 
+
+/// Scores rookies' first `last_game` player-games with draft×role priors vs the 5-game wait.
+pub fn backtest_rookie(
+    db_path: &Path,
+    season: &str,
+    history_seasons: &[String],
+    stats: &[String],
+    prior_minutes: &[f64],
+    last_game: usize,
+) -> Result<String, String> {
+    let directory = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let connection = db::open(db_path).map_err(show)?;
+    let regular = season::SEASON_TYPES[0];
+    let season = season::validate_season(season).map_err(show)?;
+    let draft_year = season::draft_year(&season)
+        .ok_or_else(|| format!("could not read a draft year from {season}"))?;
+    let target = db::season_games(&connection, &season, regular).map_err(show)?;
+    let seed_season = season::seed_source(&season, regular)
+        .map(|(s, _)| s)
+        .ok_or_else(|| format!("no seed season for {season}"))?;
+    let seed = db::season_games(&connection, &seed_season, regular).map_err(show)?;
+    if target.is_empty() || seed.is_empty() {
+        return Err(format!("Sync {season} and {seed_season} {regular} first."));
+    }
+    let drafts = db::draft_by_player(&connection).map_err(show)?;
+    let mut history = Vec::new();
+    for hist in history_seasons {
+        let hist = season::validate_season(hist).map_err(show)?;
+        let year = season::draft_year(&hist)
+            .ok_or_else(|| format!("could not read a draft year from {hist}"))?;
+        let games = db::season_games(&connection, &hist, regular).map_err(show)?;
+        if games.is_empty() {
+            return Err(format!("Sync {hist} {regular} first."));
+        }
+        history.push((games, year));
+    }
+    // Arm 0: today's gate (role prior after 5 games).
+    // Arm 1: role prior from game 1 (no draft).
+    // Later arms: draft×role prior from game 1.
+    let mut arms = vec![
+        engine::rookie::RookieArm {
+            rookie_prior_minutes: 0.0,
+            from_game_one: false,
+        },
+        engine::rookie::RookieArm {
+            rookie_prior_minutes: 0.0,
+            from_game_one: true,
+        },
+    ];
+    for &minutes in prior_minutes {
+        arms.push(engine::rookie::RookieArm {
+            rookie_prior_minutes: minutes,
+            from_game_one: true,
+        });
+    }
+    let mut text = format!(
+        "## {season} rookies (draft {draft_year}), player games 1-{last_game}\n\n"
+    );
+    for id in stats {
+        let stat = Stat::parse(id).ok_or_else(|| format!("'{id}' is not a stat this desk tracks."))?;
+        let spec = engine::load_spec(stat.id(), &engine::spec_dirs(directory)).map_err(show)?;
+        eprintln!("backtesting rookies on {}...", stat.id());
+        let scores = engine::rookie::run(
+            &target,
+            &seed,
+            &history,
+            &drafts,
+            draft_year,
+            stat,
+            &spec,
+            &arms,
+            last_game,
+        )
+        .map_err(show)?;
+        text.push_str(&engine::rookie::report(stat, &arms, &scores));
+        text.push('\n');
+    }
+    Ok(text)
+}
+
 pub fn backtest_prior(
     db_path: &Path,
     season: &str,
@@ -728,6 +808,20 @@ pub fn backtest_prior(
         text.push('\n');
     }
     Ok(text)
+}
+
+
+/// Pulls one draft class into the database (calendar year, e.g. 2024 → 2024-25 rookies).
+pub fn sync_draft_year(db_path: &Path, year: i32) -> Result<usize, String> {
+    let client = NbaClient::new().map_err(show)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("could not start the sync runtime: {error}"))?;
+    let picks = runtime.block_on(client.draft_history(year)).map_err(show)?;
+    let connection = db::open(db_path).map_err(show)?;
+    let stored = db::save_draft_picks(&connection, year, &picks).map_err(show)?;
+    Ok(stored.unwrap_or(0))
 }
 
 pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<SyncReport, String> {

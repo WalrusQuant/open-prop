@@ -15,6 +15,7 @@ use super::bayes::{self, at_least, band, convolve, mean, minute_nodes, scale_mix
 use super::spec::{validate, ModelSpec};
 
 pub mod backtest;
+pub mod rookie;
 
 /// The spot the user names. There is no schedule, so nothing here is "tomorrow".
 #[derive(Debug, Clone)]
@@ -149,7 +150,7 @@ pub struct ModelScore {
 }
 
 #[derive(Clone)]
-struct Obs {
+pub(crate) struct Obs {
     player_id: i64,
     date: String,
     opponent: String,

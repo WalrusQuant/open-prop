@@ -6,7 +6,7 @@ use wreq::Client;
 use wreq_util::Emulation;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{GameLog, PlayoffSeriesGame, RosterEntry};
+use crate::models::{DraftPick, GameLog, PlayoffSeriesGame, RosterEntry};
 
 /// stats.nba.com team ids to the abbreviations game logs use.
 const TEAM_ABBR: &[(i64, &str)] = &[
@@ -47,6 +47,7 @@ const GAME_LOGS_URL: &str = "https://stats.nba.com/stats/playergamelogs";
 const ROSTER_URL: &str = "https://stats.nba.com/stats/commonallplayers";
 /// Standings with clinch / play-in flags. `playoffpicture` returns HTML now.
 const STANDINGS_URL: &str = "https://stats.nba.com/stats/leaguestandingsv3";
+const DRAFT_URL: &str = "https://stats.nba.com/stats/drafthistory";
 const PLAYOFF_SERIES_URL: &str = "https://stats.nba.com/stats/commonplayoffseries";
 
 /// stats.nba.com answers a browser TLS fingerprint and returns nothing to a
@@ -94,6 +95,23 @@ impl NbaClient {
         ];
         let body = self.get_with_retries(STANDINGS_URL, &params).await?;
         parse_playoff_teams(&body)
+    }
+
+    /// Draft class for a calendar year (`2024` for the 2024 draft → 2024-25 rookies).
+    pub async fn draft_history(&self, year: i32) -> AppResult<Vec<DraftPick>> {
+        let season = year.to_string();
+        let params = [
+            ("LeagueID", "00"),
+            ("Season", season.as_str()),
+            ("OverallPickFrom", ""),
+            ("OverallPickTo", ""),
+            ("RoundNum", ""),
+            ("RoundPick", ""),
+            ("TeamID", "0"),
+            ("TopX", ""),
+        ];
+        let body = self.get_with_retries(DRAFT_URL, &params).await?;
+        parse_draft_history(&body)
     }
 
     /// Scheduled games in every playoff series for `season`. Used to spot a 4-loss elimination.
@@ -213,6 +231,29 @@ pub fn parse_playoff_teams(body: &str) -> AppResult<Vec<String>> {
     teams.sort();
     teams.dedup();
     Ok(teams)
+}
+
+/// Reads `drafthistory` for one draft year.
+pub fn parse_draft_history(body: &str) -> AppResult<Vec<DraftPick>> {
+    let (columns, rows) = result_set(body)?;
+    let mut picks = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        let overall = number_at(row, &columns, "OVERALL_PICK")? as i32;
+        if overall <= 0 {
+            continue;
+        }
+        picks.push(DraftPick {
+            player_id: number_at(row, &columns, "PERSON_ID")? as i64,
+            name: text_at(row, &columns, "PLAYER_NAME")?,
+            draft_year: number_at(row, &columns, "SEASON")? as i32,
+            round: number_at(row, &columns, "ROUND_NUMBER")? as i32,
+            overall_pick: overall,
+        });
+    }
+    Ok(picks)
 }
 
 /// Reads `commonplayoffseries`. Team ids become the abbreviations game logs use.
@@ -534,6 +575,29 @@ mod tests {
         assert_eq!(teams_26.len(), 20, "{teams_26:?}");
         assert!(teams_26.iter().any(|team| team == "OKC"));
         assert!(teams_26.iter().any(|team| team == "DET"));
+    }
+
+    #[test]
+    fn rookie_bucket_cuts() {
+        use crate::models::RookieBucket;
+        assert_eq!(RookieBucket::from_overall(Some(1)), RookieBucket::LotteryTop);
+        assert_eq!(RookieBucket::from_overall(Some(10)), RookieBucket::LotteryRest);
+        assert_eq!(RookieBucket::from_overall(Some(22)), RookieBucket::FirstRoundLate);
+        assert_eq!(RookieBucket::from_overall(Some(45)), RookieBucket::SecondRound);
+        assert_eq!(RookieBucket::from_overall(None), RookieBucket::Undrafted);
+    }
+
+    #[test]
+    fn draft_history_parse_reads_overall_pick() {
+        let body = concat!(
+            r#"{"resultSets":[{"headers":["PERSON_ID","PLAYER_NAME","SEASON","ROUND_NUMBER","ROUND_PICK","OVERALL_PICK"],"rowSet":["#,
+            r#"[1,"A",2024,1,1,1],[2,"B",2024,2,1,31]"#,
+            r#"]}]}"#
+        );
+        let picks = parse_draft_history(body).unwrap();
+        assert_eq!(picks.len(), 2);
+        assert_eq!(picks[0].overall_pick, 1);
+        assert_eq!(picks[1].round, 2);
     }
 
     #[test]

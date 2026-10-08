@@ -7,4 +7,5 @@ pub use fit::{
     Spot,
 };
 pub use fit::backtest;
+pub use fit::rookie;
 pub use spec::{load_spec, spec_dirs, ModelSpec};
