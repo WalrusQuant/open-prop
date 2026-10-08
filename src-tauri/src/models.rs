@@ -359,6 +359,13 @@ pub struct BoardRow {
 pub struct TrainQuery {
     pub season: String,
     pub season_type: String,
+    /// Carry last season into the priors when it is cached. Playoffs carry their regular season.
+    #[serde(default = "default_seed")]
+    pub seed: bool,
+}
+
+fn default_seed() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -380,6 +387,10 @@ pub struct TrainStatReport {
     pub rest_per_day: Option<f64>,
     /// True when this fit stored its priors. False means the numbers are the spec on disk.
     pub settings_stored: bool,
+    /// The season this fit carried its priors from, like "2024-25 Regular Season".
+    pub seeded_from: Option<String>,
+    pub carry_minutes: Option<f64>,
+    pub opponent_carry_minutes: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +399,8 @@ pub struct TrainReport {
     pub season: String,
     pub season_type: String,
     pub stats: Vec<TrainStatReport>,
+    /// Set when a seed was asked for but its season is not cached.
+    pub seed_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,6 +446,8 @@ pub struct Prediction {
     pub holdout_coverage: Option<f64>,
     pub train_rows: usize,
     pub holdout_rows: usize,
+    /// Set while last season's carry outweighs this season's games, like "2024-25 Regular Season".
+    pub prior_from: Option<String>,
 }
 
 #[cfg(test)]

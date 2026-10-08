@@ -262,12 +262,18 @@ pub async fn train_models(
     if games.is_empty() {
         return Err("No cached games for that season. Sync it, then train.".to_string());
     }
+    let (seed, seed_note) = if query.seed {
+        let connection = lock_db(&state.db)?;
+        seed_games(&connection, &season, &season_type)?
+    } else {
+        (None, None)
+    };
     let spec_dirs = state.spec_dirs.clone();
     let models_dir = state.models_dir.clone();
     let season_for_train = season.clone();
     let type_for_train = season_type.clone();
     let stats = tokio::task::spawn_blocking(move || {
-        train_season(&games, &season_for_train, &type_for_train, &spec_dirs, &models_dir)
+        train_season(&games, &season_for_train, &type_for_train, seed.as_ref(), &spec_dirs, &models_dir)
     })
     .await
     .map_err(|error| format!("training stopped: {error}"))?;
@@ -276,7 +282,29 @@ pub async fn train_models(
         season,
         season_type,
         stats,
+        seed_note,
     })
+}
+
+/// Cached games of the season that seeds this one, or a note saying why there are none.
+type SeedGames = (String, String, Vec<GameLog>);
+
+fn seed_games(
+    connection: &rusqlite::Connection,
+    season: &str,
+    season_type: &str,
+) -> Result<(Option<SeedGames>, Option<String>), String> {
+    let Some((seed_season, seed_type)) = season::seed_source(season, season_type) else {
+        return Ok((None, None));
+    };
+    let games = db::season_games(connection, &seed_season, &seed_type).map_err(show)?;
+    if games.is_empty() {
+        let note = format!(
+            "{seed_season} {seed_type} is not cached, so this fit starts from the role priors. Sync it to carry it over."
+        );
+        return Ok((None, Some(note)));
+    }
+    Ok((Some((seed_season, seed_type, games)), None))
 }
 
 #[tauri::command]
@@ -340,6 +368,7 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
         holdout_coverage: numbers.holdout_coverage,
         train_rows: numbers.train_rows,
         holdout_rows: numbers.holdout_rows,
+        prior_from: numbers.prior_from,
     })
 }
 
@@ -347,12 +376,18 @@ fn train_season(
     games: &[GameLog],
     season: &str,
     season_type: &str,
+    seed: Option<&SeedGames>,
     spec_dirs: &[PathBuf],
     models_dir: &Path,
 ) -> Vec<TrainStatReport> {
+    let seed = seed.map(|(seed_season, seed_type, seed_games)| engine::Seed {
+        games: seed_games,
+        season: seed_season,
+        season_type: seed_type,
+    });
     Stat::all()
         .iter()
-        .map(|stat| match train_stat(games, *stat, season, season_type, spec_dirs, models_dir) {
+        .map(|stat| match train_stat(games, *stat, season, season_type, seed.as_ref(), spec_dirs, models_dir) {
             Ok(report) => report,
             Err(error) => {
                 let mut report = bare_report(*stat);
@@ -389,6 +424,9 @@ fn score_stat(
             report.home_multiplier = score.home_multiplier;
             report.rest_per_day = score.rest_per_day;
             report.settings_stored = score.settings_stored;
+            report.seeded_from = score.seeded_from;
+            report.carry_minutes = score.carry_minutes;
+            report.opponent_carry_minutes = score.opponent_carry_minutes;
             report
         }
         Err(error) => {
@@ -420,6 +458,9 @@ fn bare_report(stat: Stat) -> TrainStatReport {
         home_multiplier: None,
         rest_per_day: None,
         settings_stored: false,
+        seeded_from: None,
+        carry_minutes: None,
+        opponent_carry_minutes: None,
     }
 }
 
@@ -434,6 +475,12 @@ fn fill_spec_gaps(report: &mut TrainStatReport, spec: &ModelSpec) {
     if report.shift_prior.is_none() {
         report.shift_prior = Some(spec.shift_prior);
     }
+    if report.carry_minutes.is_none() {
+        report.carry_minutes = Some(spec.carry_minutes);
+    }
+    if report.opponent_carry_minutes.is_none() {
+        report.opponent_carry_minutes = Some(spec.opponent_carry_minutes);
+    }
 }
 
 fn train_stat(
@@ -441,6 +488,7 @@ fn train_stat(
     stat: Stat,
     season: &str,
     season_type: &str,
+    seed: Option<&engine::Seed>,
     spec_dirs: &[PathBuf],
     models_dir: &Path,
 ) -> Result<TrainStatReport, String> {
@@ -454,7 +502,7 @@ fn train_stat(
             spec.stat
         ));
     }
-    let fitted = engine::train_one(games, &spec, season, season_type).map_err(show)?;
+    let fitted = engine::train_one(games, &spec, season, season_type, seed).map_err(show)?;
     let fitted_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
     engine::save_model(&fitted, &fitted_at, models_dir).map_err(show)?;
     let mut report = bare_report(stat);
@@ -470,6 +518,9 @@ fn train_stat(
     report.home_multiplier = fitted.home_multiplier;
     report.rest_per_day = fitted.rest_per_day;
     report.settings_stored = true;
+    report.seeded_from = fitted.seeded_from.clone();
+    report.carry_minutes = Some(fitted.carry_minutes);
+    report.opponent_carry_minutes = Some(fitted.opponent_carry_minutes);
     fill_spec_gaps(&mut report, &spec);
     Ok(report)
 }
@@ -485,13 +536,22 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
     if games.is_empty() {
         return Err("No cached games for that season. Sync it, then train.".to_string());
     }
+    let (seed, seed_note) = seed_games(&connection, &season, &season_type)?;
     let models_dir = directory.join("models");
     engine::migrate_legacy_models(&models_dir).map_err(show)?;
-    let stats = train_season(&games, &season, &season_type, &engine::spec_dirs(directory), &models_dir);
+    let stats = train_season(
+        &games,
+        &season,
+        &season_type,
+        seed.as_ref(),
+        &engine::spec_dirs(directory),
+        &models_dir,
+    );
     Ok(TrainReport {
         season,
         season_type,
         stats,
+        seed_note,
     })
 }
 

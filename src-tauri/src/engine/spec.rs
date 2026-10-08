@@ -23,6 +23,13 @@ pub struct ModelSpec {
     /// Prior standard deviation of the log rest multiplier, per day of rest.
     #[serde(default = "default_rest_sd")]
     pub rest_sd: f64,
+    /// Most pseudo-minutes of a player's last season that a seeded fit carries into his prior.
+    /// Zero turns the player seed off.
+    #[serde(default = "default_carry_minutes")]
+    pub carry_minutes: f64,
+    /// Pseudo-minutes that pull an opponent multiplier toward last season's value.
+    #[serde(default = "default_opponent_carry_minutes")]
+    pub opponent_carry_minutes: f64,
 }
 
 fn default_roles() -> Vec<f64> {
@@ -35,6 +42,16 @@ fn default_home_sd() -> f64 {
 
 fn default_rest_sd() -> f64 {
     0.015
+}
+
+pub(crate) const DEFAULT_CARRY_MINUTES: f64 = 1000.0;
+
+fn default_carry_minutes() -> f64 {
+    DEFAULT_CARRY_MINUTES
+}
+
+fn default_opponent_carry_minutes() -> f64 {
+    1500.0
 }
 
 /// Where an edited spec is allowed to live. The first file that exists wins.
@@ -115,6 +132,18 @@ pub(crate) fn validate(spec: &ModelSpec) -> AppResult<()> {
             "home_sd has to be from 0 to 1, and rest_sd from 0 to 0.2.".to_string(),
         ));
     }
+    if !spec.carry_minutes.is_finite() || !(0.0..=5000.0).contains(&spec.carry_minutes) {
+        return Err(AppError::message(
+            "carry_minutes has to be from 0 to 5000.".to_string(),
+        ));
+    }
+    if !spec.opponent_carry_minutes.is_finite()
+        || !(0.0..=20000.0).contains(&spec.opponent_carry_minutes)
+    {
+        return Err(AppError::message(
+            "opponent_carry_minutes has to be from 0 to 20000.".to_string(),
+        ));
+    }
     Ok(())
 }
 
@@ -157,6 +186,25 @@ mod tests {
             let spec = load_spec(stat.id(), &[dir.clone()]).unwrap();
             assert_eq!(spec.stat, stat.id());
             assert!(spec.prior_minutes > 0.0, "{}", stat.id());
+        }
+    }
+
+    #[test]
+    fn carry_priors_default_and_stay_in_range() {
+        let base = r#""stat": "points", "prior_minutes": 240, "opponent_minutes": 1500, "shift_prior": 0.1"#;
+        let spec = parse_spec(&format!("{{{base}}}")).unwrap();
+        assert_eq!(spec.carry_minutes, DEFAULT_CARRY_MINUTES);
+        assert_eq!(spec.opponent_carry_minutes, 1500.0);
+        let off = parse_spec(&format!(r#"{{{base}, "carry_minutes": 0, "opponent_carry_minutes": 0}}"#)).unwrap();
+        assert_eq!((off.carry_minutes, off.opponent_carry_minutes), (0.0, 0.0));
+        for bad in [
+            r#""carry_minutes": -1"#,
+            r#""carry_minutes": 5001"#,
+            r#""opponent_carry_minutes": -5"#,
+            r#""opponent_carry_minutes": 20001"#,
+        ] {
+            let error = parse_spec(&format!("{{{base}, {bad}}}")).unwrap_err();
+            assert!(error.to_string().contains("carry_minutes"), "{bad}: {error}");
         }
     }
 

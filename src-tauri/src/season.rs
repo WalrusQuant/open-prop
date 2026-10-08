@@ -58,6 +58,17 @@ pub fn validate_season_type(value: &str) -> AppResult<String> {
     }
 }
 
+/// Where a fit borrows its prior: playoffs from the same regular season, a regular season
+/// from the one before.
+pub fn seed_source(season: &str, season_type: &str) -> Option<(String, String)> {
+    let regular = SEASON_TYPES[0].to_string();
+    if season_type == SEASON_TYPES[1] {
+        return Some((season.to_string(), regular));
+    }
+    let start = season_start_year(season)?;
+    Some((format_season(start - 1), regular))
+}
+
 fn season_start_year(value: &str) -> Option<i32> {
     let (start, end) = value.split_once('-')?;
     if start.len() != 4 || end.len() != 2 {
@@ -97,6 +108,24 @@ mod tests {
         assert!(starts.contains(&2025));
         assert!(starts.contains(&2026));
         assert_eq!(*starts.first().unwrap(), 2021);
+    }
+
+    #[test]
+    fn playoffs_seed_from_their_regular_season_and_a_season_from_the_last() {
+        let regular = "Regular Season".to_string();
+        assert_eq!(
+            seed_source("2025-26", "Playoffs"),
+            Some(("2025-26".to_string(), regular.clone()))
+        );
+        assert_eq!(
+            seed_source("2025-26", "Regular Season"),
+            Some(("2024-25".to_string(), regular.clone()))
+        );
+        assert_eq!(
+            seed_source("2000-01", "Regular Season"),
+            Some(("1999-00".to_string(), regular))
+        );
+        assert_eq!(seed_source("season", "Regular Season"), None);
     }
 
     #[test]

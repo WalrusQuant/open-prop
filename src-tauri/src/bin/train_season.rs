@@ -15,6 +15,12 @@ fn main() {
         .unwrap_or_else(|| "Regular Season".to_string());
     let report = open_prop_lib::train_cached(&db, &season, &season_type)
         .unwrap_or_else(|error| panic!("{error}"));
+    if let Some(note) = &report.seed_note {
+        println!("{note}");
+    }
+    if let Some(source) = report.stats.iter().find_map(|stat| stat.seeded_from.as_deref()) {
+        println!("Carried {source}.");
+    }
     println!(
         "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "stat", "holdout", "last 10", "cover", "train", "hold"
