@@ -83,6 +83,8 @@ struct Population {
     /// Last season per player. Empty for an unseeded fit and for older files.
     #[serde(default)]
     carry: BTreeMap<i64, Carry>,
+    #[serde(default)]
+    carry_decay_tau: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -105,6 +107,7 @@ pub struct Fitted {
     pub seeded_from: Option<String>,
     pub carry_minutes: f64,
     pub opponent_carry_minutes: f64,
+    pub carry_decay_tau: f64,
 }
 
 pub struct PredictNumbers {
@@ -142,6 +145,7 @@ pub struct ModelScore {
     pub seeded_from: Option<String>,
     pub carry_minutes: Option<f64>,
     pub opponent_carry_minutes: Option<f64>,
+    pub carry_decay_tau: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -225,6 +229,7 @@ pub fn train_one(
         seeded_from,
         carry_minutes: spec.carry_minutes,
         opponent_carry_minutes: spec.opponent_carry_minutes,
+        carry_decay_tau: spec.carry_decay_tau,
     })
 }
 
@@ -303,6 +308,7 @@ fn borrowed_population(seed: &SeedPart, spec: &ModelSpec, teams: &BTreeSet<Strin
     population.shift_prior = spec.shift_prior;
     population.teams = teams.clone();
     population.carry = seed.carry.clone();
+    population.carry_decay_tau = spec.carry_decay_tau;
     population
 }
 
@@ -506,6 +512,7 @@ pub fn save_model(fitted: &Fitted, fitted_at: &str, directory: &Path) -> AppResu
         seeded_from: fitted.seeded_from.clone(),
         carry_minutes: fitted.carry_minutes,
         opponent_carry_minutes: fitted.opponent_carry_minutes,
+        carry_decay_tau: fitted.carry_decay_tau,
     };
     write_atomic(&path, |writer| {
         serde_json::to_writer(writer, &saved)?;
@@ -566,6 +573,7 @@ pub fn load_model(directory: &Path, season: &str, season_type: &str, stat: &str)
         seeded_from: saved.seeded_from,
         carry_minutes: saved.carry_minutes,
         opponent_carry_minutes: saved.opponent_carry_minutes,
+        carry_decay_tau: saved.carry_decay_tau,
     })
 }
 
@@ -592,6 +600,7 @@ pub fn load_score(
         seeded_from: saved.seeded_from,
         carry_minutes: Some(saved.carry_minutes),
         opponent_carry_minutes: Some(saved.opponent_carry_minutes),
+        carry_decay_tau: Some(saved.carry_decay_tau),
     })
 }
 
@@ -787,6 +796,7 @@ fn fit_population(
         rest_log,
         league_rate,
         carry: carry.clone(),
+        carry_decay_tau: spec.carry_decay_tau,
     })
 }
 
@@ -815,9 +825,23 @@ fn role_minutes(minutes: f64, games: usize, carry: Option<&Carry>) -> f64 {
     }
 }
 
+/// Weight on last season's carry after `current_minutes` this season. Tau 0 keeps full carry.
+fn carry_weight(current_minutes: f64, tau: f64) -> f64 {
+    if !(tau > 0.0) || !(current_minutes > 0.0) {
+        return 1.0;
+    }
+    (-current_minutes / tau).exp()
+}
+
 /// The gamma prior on a player's rate: the role prior, plus last season's discounted totals.
-fn rate_prior(part: &Population, prior_rate: f64, carry: Option<&Carry>) -> (f64, f64) {
-    let (stat, exposure) = carry.map_or((0.0, 0.0), |carry| (carry.stat, carry.exposure));
+fn rate_prior(
+    part: &Population,
+    prior_rate: f64,
+    carry: Option<&Carry>,
+    current_minutes: f64,
+) -> (f64, f64) {
+    let weight = carry_weight(current_minutes, part.carry_decay_tau);
+    let (stat, exposure) = carry.map_or((0.0, 0.0), |carry| (carry.stat * weight, carry.exposure * weight));
     (part.prior_minutes * prior_rate.max(0.0) + stat, part.prior_minutes + exposure)
 }
 
@@ -1169,7 +1193,8 @@ fn pmf_at(
 ) -> (Vec<f64>, Option<f64>) {
     let role = role_index(history_role_minutes(history, carry), &part.role_minutes);
     let prior_rate = part.role_rates.get(role).copied().unwrap_or(part.league_rate).max(0.0);
-    let (prior_shape, prior_scale) = rate_prior(part, prior_rate, carry);
+    let current_minutes: f64 = history.iter().map(|row| row.minutes).sum();
+    let (prior_shape, prior_scale) = rate_prior(part, prior_rate, carry, current_minutes);
     let season = posterior(part, history, prior_shape, prior_scale);
     let exposure = predictive_exposure(part, minutes, opponent, home, rest_days);
     let season_pmf = bayes::negative_binomial(season.shape, season.rate, exposure);
@@ -1272,6 +1297,8 @@ struct SavedModel {
     carry_minutes: f64,
     #[serde(default)]
     opponent_carry_minutes: f64,
+    #[serde(default)]
+    carry_decay_tau: f64,
 }
 
 /// `Regular Season` becomes `regular-season`. Anything outside letters and digits becomes a dash.
@@ -1435,6 +1462,7 @@ mod tests {
             rest_sd: 0.02,
             carry_minutes: 400.0,
             opponent_carry_minutes: 1500.0,
+            carry_decay_tau: 0.0,
         }
     }
 
@@ -1471,6 +1499,38 @@ mod tests {
             season: "2024-25",
             season_type: "Regular Season",
         }
+    }
+
+    #[test]
+    fn carry_decays_with_current_minutes() {
+        assert!((carry_weight(0.0, 1000.0) - 1.0).abs() < 1e-12);
+        assert!((carry_weight(500.0, 0.0) - 1.0).abs() < 1e-12);
+        let half = carry_weight(1000.0 * (2.0_f64).ln(), 1000.0);
+        assert!((half - 0.5).abs() < 1e-9, "{half}");
+        let prior = rate_prior(
+            &Population {
+                stat: "pts".into(),
+                prior_minutes: 100.0,
+                opponent_minutes: 500.0,
+                shift_prior: 0.1,
+                role_minutes: vec![15.0, 28.0],
+                role_rates: vec![0.5],
+                role_minute_means: vec![30.0],
+                role_log_sd: vec![0.2],
+                opponents: BTreeMap::new(),
+                teams: BTreeSet::new(),
+                home_log: 0.0,
+                rest_log: 0.0,
+                league_rate: 0.5,
+                carry: BTreeMap::new(),
+                carry_decay_tau: 1000.0,
+            },
+            0.5,
+            Some(&Carry { stat: 200.0, exposure: 400.0, minutes: 32.0 }),
+            1000.0 * (2.0_f64).ln(),
+        );
+        assert!((prior.0 - (100.0 * 0.5 + 100.0)).abs() < 1e-6, "{:?}", prior);
+        assert!((prior.1 - (100.0 + 200.0)).abs() < 1e-6, "{:?}", prior);
     }
 
     #[test]
@@ -1622,6 +1682,7 @@ mod tests {
             rest_log: 0.0,
             league_rate: 0.4,
             carry: [(1, Carry { stat: 300.0, exposure: 600.0, minutes: 34.0 })].into_iter().collect(),
+            carry_decay_tau: 0.0,
         };
         let center = |history: &[Obs], player: i64| {
             let plan = minutes_plan(Some(&part), history, None, player);
@@ -1676,6 +1737,7 @@ mod tests {
             rest_log: 0.0,
             league_rate,
             carry: BTreeMap::new(),
+            carry_decay_tau: 0.0,
         };
         let seed = SeedPart { population: part, carry: BTreeMap::new() };
         let mut settings = spec(0.08);

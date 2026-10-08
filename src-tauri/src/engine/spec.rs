@@ -30,6 +30,9 @@ pub struct ModelSpec {
     /// Pseudo-minutes that pull an opponent multiplier toward last season's value.
     #[serde(default = "default_opponent_carry_minutes")]
     pub opponent_carry_minutes: f64,
+    /// Minutes scale for exp(-m/tau) decay of the player carry. 0 turns decay off.
+    #[serde(default = "default_carry_decay_tau")]
+    pub carry_decay_tau: f64,
 }
 
 fn default_roles() -> Vec<f64> {
@@ -52,6 +55,10 @@ fn default_carry_minutes() -> f64 {
 
 fn default_opponent_carry_minutes() -> f64 {
     1500.0
+}
+
+fn default_carry_decay_tau() -> f64 {
+    500.0
 }
 
 /// Where an edited spec is allowed to live. The first file that exists wins.
@@ -142,6 +149,11 @@ pub(crate) fn validate(spec: &ModelSpec) -> AppResult<()> {
     {
         return Err(AppError::message(
             "opponent_carry_minutes has to be from 0 to 20000.".to_string(),
+        ));
+    }
+    if !spec.carry_decay_tau.is_finite() || !(0.0..=20000.0).contains(&spec.carry_decay_tau) {
+        return Err(AppError::message(
+            "carry_decay_tau has to be from 0 to 20000. Zero turns decay off.".to_string(),
         ));
     }
     Ok(())
