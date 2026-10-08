@@ -25,14 +25,18 @@ pub fn suggested_season(today: NaiveDate) -> String {
     format_season(start)
 }
 
-pub fn season_starts(today: NaiveDate) -> Vec<i32> {
-    let suggested = season_start_year(&suggested_season(today)).unwrap_or(today.year() - 1);
-    let upcoming = if today.month() >= 7 {
+/// From July the rosters belong to the season that opens in October.
+fn upcoming_start(today: NaiveDate) -> i32 {
+    if today.month() >= 7 {
         today.year()
     } else {
         today.year() - 1
-    };
-    let last = suggested.max(upcoming);
+    }
+}
+
+pub fn season_starts(today: NaiveDate) -> Vec<i32> {
+    let suggested = season_start_year(&suggested_season(today)).unwrap_or(today.year() - 1);
+    let last = suggested.max(upcoming_start(today));
     (FIRST_SEASON_START..=last).collect()
 }
 
@@ -56,6 +60,12 @@ pub fn validate_season_type(value: &str) -> AppResult<String> {
             "Season type has to be Regular Season or Playoffs.".to_string(),
         ))
     }
+}
+
+/// True for the season that today's rosters belong to: the one on now, or from July the one
+/// about to open. The roster call answers with today's teams whatever season it is asked for.
+pub fn is_roster_season(season: &str, today: NaiveDate) -> bool {
+    season_start_year(season) == Some(upcoming_start(today))
 }
 
 /// Where a fit borrows its prior: playoffs from the same regular season, a regular season
@@ -126,6 +136,19 @@ mod tests {
             Some(("1999-00".to_string(), regular))
         );
         assert_eq!(seed_source("season", "Regular Season"), None);
+    }
+
+    #[test]
+    fn rosters_are_for_the_season_on_now_or_about_to_open() {
+        // Before opening night today's rosters are next season's, not the one that finished.
+        let today = day("2026-10-08");
+        assert!(is_roster_season("2026-27", today));
+        assert!(!is_roster_season("2025-26", today));
+        assert!(!is_roster_season("2024-25", today));
+        assert!(is_roster_season("2025-26", day("2026-03-01")));
+        assert!(is_roster_season("2025-26", day("2026-06-30")));
+        assert!(!is_roster_season("2025-26", day("2026-07-01")));
+        assert!(!is_roster_season("season", today));
     }
 
     #[test]

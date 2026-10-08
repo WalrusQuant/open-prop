@@ -344,13 +344,37 @@ pub fn predict_spot(
     window: &str,
     line: f64,
 ) -> AppResult<PredictNumbers> {
-    // A player with last season carried over can be priced from his first game.
+    // A player with last season carried over can be priced before his first game.
     let carried = fitted
         .parts
         .first()
         .is_some_and(|part| part.carry.contains_key(&spot.player_id));
-    let min_games = if carried { 1 } else { MIN_PRIOR };
-    predict_with(fitted, games, spot, window, line, min_games)
+    if !carried {
+        let stat = Stat::parse(&fitted.stat).ok_or_else(|| {
+            AppError::message(format!("'{}' is not a stat this desk tracks.", fitted.stat))
+        })?;
+        let played = parts_of(stat)
+            .first()
+            .map(|part| {
+                observations(games, *part)
+                    .iter()
+                    .filter(|row| row.player_id == spot.player_id)
+                    .count()
+            })
+            .unwrap_or(0);
+        if played < MIN_PRIOR {
+            let games_word = if played == 1 { "game" } else { "games" };
+            return Err(AppError::message(match fitted.seeded_from.as_deref() {
+                Some(source) => format!(
+                    "He has no {source} minutes to carry, so a prediction waits for {MIN_PRIOR} games this season. He has {played} {games_word}."
+                ),
+                None => format!(
+                    "This player has {played} cached {games_word}. A prediction starts after {MIN_PRIOR}."
+                ),
+            }));
+        }
+    }
+    predict_with(fitted, games, spot, window, line, 0)
 }
 
 /// `predict_spot` with the game minimum as an argument. The backtest prices game one with 0.
@@ -1501,7 +1525,7 @@ mod tests {
         assert_eq!(star.prior_from.as_deref(), Some("2024-25 Regular Season"));
         // The rookie keeps the five-game gate and, under it, the role prior.
         let error = predict_spot(&fitted, &games, &spot(9), "last_10", 20.5).err().unwrap();
-        assert!(error.to_string().contains("starts after 5"), "{error}");
+        assert!(error.to_string().contains("waits for 5 games"), "{error}");
         let rookie = predict_with(&fitted, &games, &spot(9), "last_10", 20.5, 0).unwrap();
         assert!(rookie.prior_from.is_none());
         assert!(rookie.mean > 10.0 && rookie.mean < 18.0, "rookie mean {:.2}", rookie.mean);
@@ -1513,6 +1537,52 @@ mod tests {
         let later = predict_spot(&fitted, &longer, &spot(1), "season", 20.5).unwrap();
         assert!(later.prior_from.is_none());
         assert!(later.mean < star.mean);
+    }
+
+    #[test]
+    fn a_seeded_fit_with_no_games_this_season_borrows_last_season() {
+        let before = last_season();
+        let error = train_one(&[], &spec(0.08), "2025-26", "Regular Season", None).unwrap_err();
+        assert!(error.to_string().contains("no training games"), "{error}");
+        let fitted = train_one(&[], &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        assert_eq!(fitted.seeded_from.as_deref(), Some("2024-25 Regular Season"));
+        assert_eq!((fitted.train_rows, fitted.holdout_rows), (0, 0));
+        assert!(fitted.holdout_mae.is_none());
+        let source = seed_parts(&before, Stat::Points, &spec(0.08)).unwrap();
+        let source = source[0].as_ref().unwrap();
+        assert_eq!(fitted.parts[0].role_rates, source.population.role_rates);
+        assert_eq!(fitted.parts[0].role_minute_means, source.population.role_minute_means);
+        assert!(fitted.parts[0].teams.contains("BOS"));
+        // Every part of a combo is borrowed the same way.
+        let mut combo = spec(0.08);
+        combo.stat = "points_assists_rebounds".to_string();
+        let fitted = train_one(&[], &combo, "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        assert_eq!(fitted.parts.len(), 3);
+    }
+
+    #[test]
+    fn a_carried_player_is_priced_before_his_first_game_and_a_rookie_is_told_why_not() {
+        let before = last_season();
+        let fitted = train_one(&[], &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        let spot = |player| Spot {
+            player_id: player,
+            opponent: Some("BOS".to_string()),
+            home: true,
+            rest_days: 2.0,
+            minutes: None,
+        };
+        let star = predict_spot(&fitted, &[], &spot(1), "last_10", 25.5).unwrap();
+        assert!(star.mean > 24.0 && star.mean < 34.0, "carry alone, mean {:.2}", star.mean);
+        assert!((star.minutes - 32.0).abs() < 2.0, "minutes start at last season's 32, {:.1}", star.minutes);
+        assert_eq!(star.prior_from.as_deref(), Some("2024-25 Regular Season"));
+        assert!(star.clear_probability > 0.5);
+        assert!((star.pmf.iter().sum::<f64>() - 1.0).abs() < 0.02);
+        let bench = predict_spot(&fitted, &[], &spot(2), "last_10", 25.5).unwrap();
+        assert!(bench.mean < 14.0, "a 10-point player stays near 10, mean {:.2}", bench.mean);
+        let error = predict_spot(&fitted, &[], &spot(9), "last_10", 25.5).err().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("no 2024-25 Regular Season minutes to carry"), "{message}");
+        assert!(message.contains("He has 0 games"), "{message}");
     }
 
     #[test]

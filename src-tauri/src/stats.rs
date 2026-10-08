@@ -1,7 +1,8 @@
 use chrono::NaiveDate;
 
 use crate::models::{
-    BoardRow, BoardSplit, GameLog, Stat, TrendGame, TrendReport, TrendSplit, TrendSummary, Window,
+    BoardRow, BoardSplit, GameLog, LastSeason, PlayerOption, Stat, TeamSource, TrendGame, TrendReport,
+    TrendSplit, TrendSummary, Window,
 };
 
 /// A game counts as an over when the stat is greater than or equal to the line.
@@ -249,7 +250,42 @@ pub fn trend_report(
         },
         splits,
         games: report_games,
+        no_games: false,
+        team_source: TeamSource::Season,
+        last_season: None,
     }
+}
+
+/// The report for a listed player with no game this season: empty windows, plus his carried
+/// season against the same line when `carried` has games (`("2025-26 Regular Season", games)`).
+pub fn no_games_report(
+    player: &PlayerOption,
+    stat: Stat,
+    window: Window,
+    line: f64,
+    season: &str,
+    season_type: &str,
+    carried: Option<(&str, &[GameLog])>,
+) -> TrendReport {
+    let mut report = trend_report(&[], stat, window, line, season, season_type);
+    report.player_id = player.player_id;
+    report.player_name = player.name.clone();
+    report.team = player.team.clone();
+    report.team_source = player.team_source;
+    report.no_games = true;
+    report.last_season = carried
+        .filter(|(_, games)| games.iter().any(played))
+        .and_then(|(label, games)| {
+            let whole = trend_report(games, stat, Window::Season, line, season, season_type);
+            let median = whole.summary.median;
+            let split = whole.splits.into_iter().find(|item| item.window == Window::Season.id())?;
+            Some(LastSeason {
+                season: label.to_string(),
+                split,
+                median,
+            })
+        });
+    report
 }
 
 fn window_hits(values: &[f64], line: f64, count: Option<usize>) -> BoardSplit {
@@ -345,6 +381,38 @@ mod tests {
             ftm: 4,
             plus_minus: 5,
         }
+    }
+
+    #[test]
+    fn a_player_without_games_gets_empty_windows_and_last_season_labelled() {
+        let player = PlayerOption {
+            player_id: 7,
+            name: "A Player".to_string(),
+            team: "MIN".to_string(),
+            games: 0,
+            team_source: TeamSource::LastSeason,
+        };
+        let last = vec![game("2025-01-01", 30, 5, 5), game("2025-01-03", 10, 5, 5), game("2025-01-05", 26, 5, 5)];
+        let report = no_games_report(
+            &player,
+            Stat::Points,
+            Window::Last10,
+            25.0,
+            "2025-26",
+            "Regular Season",
+            Some(("2024-25 Regular Season", &last)),
+        );
+        assert!(report.no_games);
+        assert_eq!((report.player_name.as_str(), report.team.as_str()), ("A Player", "MIN"));
+        assert_eq!(report.team_source, TeamSource::LastSeason);
+        assert!(report.games.is_empty());
+        assert!(report.splits.iter().all(|split| split.sample == 0 && split.hit_rate.is_none()));
+        let carried = report.last_season.unwrap();
+        assert_eq!(carried.season, "2024-25 Regular Season");
+        assert_eq!((carried.split.overs, carried.split.sample), (2, 3));
+        assert_eq!(carried.median, Some(26.0));
+        let rookie = no_games_report(&player, Stat::Points, Window::Last10, 25.0, "2025-26", "Regular Season", None);
+        assert!(rookie.last_season.is_none());
     }
 
     #[test]

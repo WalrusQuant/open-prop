@@ -1,8 +1,11 @@
+use std::collections::{HashMap, HashSet};
+
 use chrono::Utc;
 use rusqlite::{params, Connection};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{GameLog, PlayerOption, SeasonStatus, SyncReport};
+use crate::models::{GameLog, PlayerOption, RosterEntry, SeasonStatus, SyncReport, TeamSource};
+use crate::season;
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS game_logs (
@@ -41,7 +44,19 @@ CREATE TABLE IF NOT EXISTS sync_meta (
     players INTEGER NOT NULL,
     PRIMARY KEY (season, season_type)
 );
+
+CREATE TABLE IF NOT EXISTS rosters (
+    season TEXT NOT NULL,
+    player_id INTEGER NOT NULL,
+    player_name TEXT NOT NULL,
+    team_abbr TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (season, player_id)
+);
 ";
+
+/// A roster answer with fewer players than this is treated as broken and the stored one is kept.
+const MIN_ROSTER_PLAYERS: usize = 300;
 
 pub fn open(path: &std::path::Path) -> AppResult<Connection> {
     if let Some(parent) = path.parent() {
@@ -104,6 +119,7 @@ pub fn merge_logs(
             fetched: games.len(),
             synced_at: synced_at(connection, season, season_type)?,
             warning: Some(warning),
+            roster_players: None,
         });
     }
     let synced_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -160,6 +176,7 @@ pub fn merge_logs(
         fetched: games.len(),
         synced_at: Some(synced_at),
         warning: None,
+        roster_players: None,
     })
 }
 
@@ -232,6 +249,109 @@ pub fn players(connection: &Connection, season: &str, season_type: &str) -> AppR
             name: row.get(1)?,
             team: row.get(2)?,
             games: row.get(3)?,
+            team_source: TeamSource::Season,
+        })
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// The player list with carry on: this season's players, then players from the season it
+/// carries who have no game yet, then anyone else on this season's rosters. With a stored
+/// roster, carried players who are on no roster are dropped and teams come from the roster.
+pub fn players_with_carry(
+    connection: &Connection,
+    season: &str,
+    season_type: &str,
+) -> AppResult<Vec<PlayerOption>> {
+    let current = players(connection, season, season_type)?;
+    let carried = match season::seed_source(season, season_type) {
+        Some((seed_season, seed_type)) => players(connection, &seed_season, &seed_type)?,
+        None => Vec::new(),
+    };
+    let roster = roster(connection, season)?;
+    Ok(merge_players(current, carried, &roster))
+}
+
+/// Unions the three lists. A player keeps the first entry he has: this season, then carried, then roster.
+pub fn merge_players(
+    current: Vec<PlayerOption>,
+    carried: Vec<PlayerOption>,
+    roster: &[RosterEntry],
+) -> Vec<PlayerOption> {
+    let on_roster: HashMap<i64, &RosterEntry> = roster.iter().map(|entry| (entry.player_id, entry)).collect();
+    let mut seen: HashSet<i64> = current.iter().map(|player| player.player_id).collect();
+    let mut merged = current;
+    for player in carried {
+        if !seen.insert(player.player_id) {
+            continue;
+        }
+        let entry = if roster.is_empty() {
+            Some(PlayerOption {
+                games: 0,
+                team_source: TeamSource::LastSeason,
+                ..player
+            })
+        } else {
+            on_roster.get(&player.player_id).map(|listed| PlayerOption {
+                team: listed.team_abbr.clone(),
+                games: 0,
+                team_source: TeamSource::Roster,
+                ..player
+            })
+        };
+        merged.extend(entry);
+    }
+    for listed in roster {
+        if seen.insert(listed.player_id) {
+            merged.push(PlayerOption {
+                player_id: listed.player_id,
+                name: listed.name.clone(),
+                team: listed.team_abbr.clone(),
+                games: 0,
+                team_source: TeamSource::Roster,
+            });
+        }
+    }
+    merged.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then(left.player_id.cmp(&right.player_id))
+    });
+    merged
+}
+
+/// Replaces the stored roster for `season`. An answer under `MIN_ROSTER_PLAYERS` keeps the old one
+/// and returns None.
+pub fn save_roster(connection: &Connection, season: &str, entries: &[RosterEntry]) -> AppResult<Option<usize>> {
+    if entries.len() < MIN_ROSTER_PLAYERS {
+        return Ok(None);
+    }
+    let fetched_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute("DELETE FROM rosters WHERE season = ?1", params![season])?;
+    {
+        let mut statement = transaction.prepare(
+            "INSERT OR REPLACE INTO rosters (season, player_id, player_name, team_abbr, fetched_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for entry in entries {
+            statement.execute(params![season, entry.player_id, entry.name, entry.team_abbr, fetched_at])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(Some(entries.len()))
+}
+
+pub fn roster(connection: &Connection, season: &str) -> AppResult<Vec<RosterEntry>> {
+    let mut statement = connection.prepare(
+        "SELECT player_id, player_name, team_abbr FROM rosters WHERE season = ?1 ORDER BY player_id",
+    )?;
+    let rows = statement.query_map(params![season], |row| {
+        Ok(RosterEntry {
+            player_id: row.get(0)?,
+            name: row.get(1)?,
+            team_abbr: row.get(2)?,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
@@ -316,6 +436,72 @@ mod tests {
             ftm: 4,
             plus_minus: 4,
         }
+    }
+
+    fn roster_of(extra: &[(i64, &str, &str)]) -> Vec<RosterEntry> {
+        let mut entries: Vec<RosterEntry> = (1000..1000 + MIN_ROSTER_PLAYERS as i64)
+            .map(|id| RosterEntry {
+                player_id: id,
+                name: format!("Depth {id}"),
+                team_abbr: "UTA".to_string(),
+            })
+            .collect();
+        for (id, name, team) in extra {
+            entries.push(RosterEntry {
+                player_id: *id,
+                name: name.to_string(),
+                team_abbr: team.to_string(),
+            });
+        }
+        entries
+    }
+
+    fn opening_night() -> Connection {
+        let connection = open_memory().unwrap();
+        let last = vec![
+            sample(7, "A Player", "DEN", "2025-01-01", 20),
+            sample(7, "A Player", "MIN", "2025-02-01", 30),
+            sample(8, "B Player", "BOS", "2025-01-04", 18),
+            sample(9, "C Player", "LAL", "2025-01-04", 12),
+        ];
+        merge_logs(&connection, "2024-25", "Regular Season", &last).unwrap();
+        merge_logs(&connection, "2025-26", "Regular Season", &[sample(7, "A Player", "MIN", "2025-10-22", 25)])
+            .unwrap();
+        connection
+    }
+
+    #[test]
+    fn carried_players_join_the_list_with_last_seasons_team() {
+        let connection = opening_night();
+        let plain = players(&connection, "2025-26", "Regular Season").unwrap();
+        assert_eq!(plain.len(), 1);
+        let listed = players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let names: Vec<_> = listed.iter().map(|player| (player.player_id, player.team.as_str(), player.games)).collect();
+        assert_eq!(names, vec![(7, "MIN", 1), (8, "BOS", 0), (9, "LAL", 0)]);
+        assert_eq!(listed[0].team_source, TeamSource::Season);
+        assert_eq!(listed[1].team_source, TeamSource::LastSeason);
+        // Playoffs carry their regular season, so every regular-season player is listed.
+        let playoffs = players_with_carry(&connection, "2025-26", "Playoffs").unwrap();
+        assert_eq!(playoffs.len(), 1);
+        assert_eq!(playoffs[0].team_source, TeamSource::LastSeason);
+    }
+
+    #[test]
+    fn a_stored_roster_moves_teams_drops_the_gone_and_adds_rookies() {
+        let connection = opening_night();
+        let entries = roster_of(&[(8, "B Player", "PHX"), (20, "D Rookie", "SAS")]);
+        assert_eq!(save_roster(&connection, "2025-26", &entries).unwrap(), Some(entries.len()));
+        let listed = players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let find = |id: i64| listed.iter().find(|player| player.player_id == id);
+        assert_eq!(find(7).unwrap().team, "MIN", "a player with games keeps his game team");
+        assert_eq!(find(8).map(|player| (player.team.as_str(), player.team_source)), Some(("PHX", TeamSource::Roster)));
+        assert!(find(9).is_none(), "on no roster, so he is gone");
+        let rookie = find(20).unwrap();
+        assert_eq!((rookie.games, rookie.team_source), (0, TeamSource::Roster));
+        assert_eq!(listed.len(), 3 + MIN_ROSTER_PLAYERS);
+        // A thin answer keeps the stored roster.
+        assert_eq!(save_roster(&connection, "2025-26", &entries[..10]).unwrap(), None);
+        assert_eq!(roster(&connection, "2025-26").unwrap().len(), entries.len());
     }
 
     #[test]

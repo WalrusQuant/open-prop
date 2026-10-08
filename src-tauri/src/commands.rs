@@ -12,7 +12,7 @@ use crate::engine::{self, Fitted, ModelSpec};
 use crate::error::AppError;
 use crate::models::{
     BoardQuery, BoardRow, Bootstrap, CatalogItem, GameLog, PlayerOption, PredictQuery, Prediction,
-    SeasonStatus, Stat, SyncReport, TrainQuery, TrainReport, TrainStatReport, TrendQuery,
+    RosterEntry, SeasonStatus, Stat, SyncReport, TrainQuery, TrainReport, TrainStatReport, TrendQuery,
     TrendReport, Window,
 };
 use crate::nba::NbaClient;
@@ -174,8 +174,35 @@ pub async fn sync_season(
         .player_game_logs(&season, &season_type)
         .await
         .map_err(show)?;
+    let roster = if wants_roster(&season) {
+        state.nba.roster(&season).await.ok()
+    } else {
+        None
+    };
     let connection = lock_db(&state.db)?;
-    db::merge_logs(&connection, &season, &season_type, &games).map_err(show)
+    finish_sync(&connection, &season, &season_type, &games, roster.as_deref())
+}
+
+/// Rosters are for the season that is on or, from July, the one about to open. The call
+/// answers with today's teams, so a finished season would get next season's rookies.
+fn wants_roster(season: &str) -> bool {
+    season::is_roster_season(season, Local::now().date_naive())
+}
+
+/// Merges the logs, then stores the roster when the call answered. A failed or thin roster
+/// leaves the stored one, and the player list falls back to last season's teams.
+fn finish_sync(
+    connection: &Connection,
+    season: &str,
+    season_type: &str,
+    games: &[GameLog],
+    roster: Option<&[RosterEntry]>,
+) -> Result<SyncReport, String> {
+    let mut report = db::merge_logs(connection, season, season_type, games).map_err(show)?;
+    if let Some(entries) = roster {
+        report.roster_players = db::save_roster(connection, season, entries).map_err(show)?;
+    }
+    Ok(report)
 }
 
 #[tauri::command]
@@ -183,11 +210,17 @@ pub fn players(
     state: State<'_, AppState>,
     season: String,
     season_type: String,
+    carry: Option<bool>,
 ) -> Result<Vec<PlayerOption>, String> {
     let season = season::validate_season(&season).map_err(show)?;
     let season_type = season::validate_season_type(&season_type).map_err(show)?;
     let connection = lock_db(&state.db)?;
-    db::players(&connection, &season, &season_type).map_err(show)
+    // With carry on, last season's players and this season's rosters are listed before their first game.
+    if carry.unwrap_or(false) {
+        db::players_with_carry(&connection, &season, &season_type).map_err(show)
+    } else {
+        db::players(&connection, &season, &season_type).map_err(show)
+    }
 }
 
 #[tauri::command]
@@ -204,9 +237,7 @@ pub fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendRepor
     let connection = lock_db(&state.db)?;
     let games = db::player_games(&connection, &season, &season_type, query.player_id).map_err(show)?;
     if games.is_empty() {
-        return Err(
-            "No cached games for that player. Sync this season, then try the name again.".to_string(),
-        );
+        return no_games_trend(&connection, &season, &season_type, query.player_id, stat, window, query.line);
     }
     Ok(stats::trend_report(
         &games,
@@ -215,6 +246,41 @@ pub fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendRepor
         query.line,
         &season,
         &season_type,
+    ))
+}
+
+/// A listed player with no game this season gets empty windows and his carried season.
+fn no_games_trend(
+    connection: &Connection,
+    season: &str,
+    season_type: &str,
+    player_id: i64,
+    stat: Stat,
+    window: Window,
+    line: f64,
+) -> Result<TrendReport, String> {
+    let player = db::players_with_carry(connection, season, season_type)
+        .map_err(show)?
+        .into_iter()
+        .find(|player| player.player_id == player_id)
+        .ok_or_else(|| {
+            "No cached games for that player. Sync this season, then try the name again.".to_string()
+        })?;
+    let carried = match season::seed_source(season, season_type) {
+        Some((seed_season, seed_type)) => {
+            let games = db::player_games(connection, &seed_season, &seed_type, player_id).map_err(show)?;
+            Some((format!("{seed_season} {seed_type}"), games))
+        }
+        None => None,
+    };
+    Ok(stats::no_games_report(
+        &player,
+        stat,
+        window,
+        line,
+        season,
+        season_type,
+        carried.as_ref().map(|(label, games)| (label.as_str(), games.as_slice())),
     ))
 }
 
@@ -259,15 +325,16 @@ pub async fn train_models(
         let connection = lock_db(&state.db)?;
         db::season_games(&connection, &season, &season_type).map_err(show)?
     };
-    if games.is_empty() {
-        return Err("No cached games for that season. Sync it, then train.".to_string());
-    }
     let (seed, seed_note) = if query.seed {
         let connection = lock_db(&state.db)?;
         seed_games(&connection, &season, &season_type)?
     } else {
         (None, None)
     };
+    // Before opening night a fit can stand on the carried season alone.
+    if games.is_empty() && seed.is_none() {
+        return Err("No cached games for that season. Sync it, then train.".to_string());
+    }
     let spec_dirs = state.spec_dirs.clone();
     let models_dir = state.models_dir.clone();
     let season_for_train = season.clone();
@@ -322,11 +389,8 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
         let connection = lock_db(&state.db)?;
         db::player_games(&connection, &season, &season_type, query.player_id).map_err(show)?
     };
-    if games.is_empty() {
-        return Err(
-            "No cached games for that player. Sync this season, then try the name again.".to_string(),
-        );
-    }
+    // No games this season is fine: a carried player is priced from the prior, and the
+    // model says why anyone else has to wait.
     let key = format!("{season}|{season_type}|{}", stat.id());
     let (generation, cached) = state.fitted.get(&key)?;
     let models_dir = state.models_dir.clone();
@@ -533,10 +597,10 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
     let season = season::validate_season(season).map_err(show)?;
     let season_type = season::validate_season_type(season_type).map_err(show)?;
     let games = db::season_games(&connection, &season, &season_type).map_err(show)?;
-    if games.is_empty() {
+    let (seed, seed_note) = seed_games(&connection, &season, &season_type)?;
+    if games.is_empty() && seed.is_none() {
         return Err("No cached games for that season. Sync it, then train.".to_string());
     }
-    let (seed, seed_note) = seed_games(&connection, &season, &season_type)?;
     let models_dir = directory.join("models");
     engine::migrate_legacy_models(&models_dir).map_err(show)?;
     let stats = train_season(
@@ -607,8 +671,13 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
     let games = runtime
         .block_on(client.player_game_logs(&season, &season_type))
         .map_err(show)?;
+    let roster = if wants_roster(&season) {
+        runtime.block_on(client.roster(&season)).ok()
+    } else {
+        None
+    };
     let connection = db::open(db_path).map_err(show)?;
-    db::merge_logs(&connection, &season, &season_type, &games).map_err(show)
+    finish_sync(&connection, &season, &season_type, &games, roster.as_deref())
 }
 
 pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, AppError> {
@@ -631,6 +700,58 @@ pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn log(id: i64, team: &str, date: &str, pts: i32) -> GameLog {
+        GameLog {
+            player_id: id,
+            player_name: format!("P{id}"),
+            team_abbr: team.to_string(),
+            game_id: format!("{id}-{date}"),
+            game_date: date.to_string(),
+            matchup: format!("{team} vs. BOS"),
+            wl: "W".to_string(),
+            minutes: 30.0,
+            pts,
+            reb: 5,
+            ast: 5,
+            stl: 1,
+            blk: 0,
+            tov: 2,
+            fgm: 8,
+            fga: 15,
+            fg3m: 2,
+            ftm: 3,
+            plus_minus: 1,
+        }
+    }
+
+    #[test]
+    fn a_failed_roster_call_falls_back_to_last_seasons_team() {
+        let connection = db::open_memory().unwrap();
+        db::merge_logs(&connection, "2024-25", "Regular Season", &[log(7, "DEN", "2025-03-01", 22)]).unwrap();
+        // Opening night: no games yet, and the roster call failed.
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], None).unwrap();
+        assert!(report.warning.is_some());
+        assert_eq!(report.roster_players, None);
+        let player = db::players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        assert_eq!(player[0].team, "DEN");
+        assert_eq!(player[0].team_source, crate::models::TeamSource::LastSeason);
+        let trend = no_games_trend(&connection, "2025-26", "Regular Season", 7, Stat::Points, Window::Last10, 20.5)
+            .unwrap();
+        assert!(trend.no_games);
+        assert_eq!(trend.last_season.as_ref().map(|last| last.split.overs), Some(1));
+        // A roster that answers moves him.
+        let mut roster: Vec<RosterEntry> = (100..500)
+            .map(|id| RosterEntry { player_id: id, name: format!("P{id}"), team_abbr: "UTA".to_string() })
+            .collect();
+        roster.push(RosterEntry { player_id: 7, name: "P7".to_string(), team_abbr: "OKC".to_string() });
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], Some(&roster)).unwrap();
+        assert_eq!(report.roster_players, Some(401));
+        let player = db::players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let seven = player.iter().find(|player| player.player_id == 7).unwrap();
+        assert_eq!(seven.team, "OKC");
+        assert!(no_games_trend(&connection, "2025-26", "Regular Season", 42, Stat::Points, Window::Last10, 20.5).is_err());
+    }
 
     #[test]
     fn a_second_fit_is_turned_away_until_the_first_ends() {
