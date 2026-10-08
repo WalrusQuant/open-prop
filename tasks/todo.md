@@ -74,8 +74,8 @@ From the October code review. Branch `review-fixes-2026-10`.
 - [x] Rust scores all four splits, their Wilson bands, and rest days. `atLeast` stays in TypeScript so a number edit does not wait on Rust; a shared fixture pins it to the Rust copy. One stat catalog in `src/lib/catalog.json`.
 - [x] Deleted `engine/features.rs` and `engine/posterior.rs`.
 - [x] Boot errors show the real message. The board line, the player number, and the model spot wait 200 ms after typing. Predict reads one player's games.
-- [ ] CSP is still `null`. A strict policy needs a run in the Tauri webview to confirm SvelteKit's inline boot script and the fonts still load.
-- [ ] Read commands still run on the main thread (review B4). Moving them to `async` is the next step if the window stutters during a sync.
+- [x] CSP set in `tauri.conf.json` on `quick-fixes-2` (Adam must verify in the desktop window before merge).
+- [x] Read commands moved off the main thread (`spawn_blocking`) on `quick-fixes-2`.
 
 `cargo test --lib`: 45 passed, 1 ignored. vitest: 19 passed. `pnpm check`: 0 errors. `pnpm build` clean. Checked in the browser preview, not in the Tauri webview.
 
@@ -94,5 +94,6 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player is priced at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
 - [x] Playoff list. Syncing Playoffs stores `leaguestandingsv3` clinch/play-in teams; once playoff games exist those teams win. Fallback is the wide list plus a sync note.
 - [x] Mid-season roster. Every sync of the roster season refreshes `commonallplayers`. Roster overrides team and board membership; waived players stay labelled "Not on a roster".
-- [ ] Rookie prior from draft position. Rookies are labelled "Rookie, needs 5 games" and still wait for five.
+- [x] Rookie prior from draft position: backtested on `rookie-prior`; **not shipped** (draft×role lost to role prior). Five-game wait stays. `sync-draft` + `backtest-rookie` available.
+- [x] League drift: backtested; **not shipped** (mixed/tiny).
 - [ ] Clicked through in the browser preview only, not in the Tauri webview.
