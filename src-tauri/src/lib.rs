@@ -22,7 +22,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let directory = app.path().app_data_dir()?;
-            let connection = db::open(&directory.join("open-trend.db"))?;
+            let connection = db::open(&directory.join("open-prop.db"))?;
             app.manage(commands::build_state(connection, &directory)?);
             Ok(())
         })

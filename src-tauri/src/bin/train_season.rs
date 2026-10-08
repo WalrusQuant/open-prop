@@ -6,7 +6,7 @@ fn main() {
             .nth(1)
             .unwrap_or_else(|| {
                 let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-                format!("{home}/Library/Application Support/com.opentrend.desk/open-trend.db")
+                format!("{home}/Library/Application Support/com.openprop.desk/open-prop.db")
             }),
     );
     let season = std::env::args().nth(2).unwrap_or_else(|| "2025-26".to_string());
