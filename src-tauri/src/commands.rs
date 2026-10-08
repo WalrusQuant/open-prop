@@ -662,7 +662,7 @@ pub fn backtest_prior(
     season: &str,
     seed_season: &str,
     stats: &[String],
-    arms: &[(f64, f64)],
+    arms: &[(f64, f64, f64)],
     last_game: usize,
 ) -> Result<String, String> {
     let directory = db_path.parent().unwrap_or_else(|| Path::new("."));
@@ -679,9 +679,10 @@ pub fn backtest_prior(
     }
     let arms: Vec<engine::backtest::Arm> = arms
         .iter()
-        .map(|(carry, opponent)| engine::backtest::Arm {
+        .map(|(carry, opponent, tau)| engine::backtest::Arm {
             carry_minutes: *carry,
             opponent_carry_minutes: *opponent,
+            carry_decay_tau: *tau,
         })
         .collect();
     let mut text = format!(
