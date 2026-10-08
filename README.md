@@ -30,6 +30,8 @@ Method is the counting rules and the model, written out. It is not a second boar
 
 A game clears the number when the stat is greater than or equal to it. A 26 against 26 counts. A line of 12.5 on the model means 13 or more, because the predictive is a count.
 
+A game with 0 minutes is a did-not-play, not a miss. The hit rates, the board, and the model all leave it out, so the last 10 is the last 10 games he played. The player page says how many were left out, and the board shows the count in the season column.
+
 | Stat | Id | Default number |
 | --- | --- | --- |
 | Points | `points` | 20 |
@@ -110,11 +112,13 @@ The database uses WAL mode. On macOS it lives at:
 ~/Library/Application Support/com.openprop.desk/open-prop.db
 ```
 
-Fitted models are JSON files in the `models` folder next to that database. One file per stat. The browser preview at `pnpm dev` uses invented names. It does not call the NBA API, and it cannot train.
+A sync merges into the cache. Each game in the response replaces the cached copy, and cached games the response left out stay. If the response is empty, or carries under half the games already cached, nothing is written and the app shows a warning instead. A Playoffs sync before the playoffs start cannot empty anything.
+
+Fitted models are JSON files in the `models` folder next to that database, one per stat, season, and season type: `models/2025-26/regular-season/points.json`. A Playoffs fit does not replace the Regular Season one. Files from older versions (`models/points.json`) move into the folder for the season stored inside them the next time the app starts. Only one fit runs at a time, and a model file is written whole or not at all. The browser preview at `pnpm dev` uses invented names. It does not call the NBA API, and it cannot train.
 
 ## Run
 
-Requirements: Node 22 or newer, pnpm, Rust 1.85 or newer, and `cmake` plus `nasm`. The HTTP client builds BoringSSL, and those two tools are what that build needs.
+Requirements: Node 20.19 or newer (Vite 7's floor; 22.12 or newer also works), pnpm, Rust 1.90 or newer (Tauri 2.12's floor), and `cmake` plus `nasm`. The HTTP client builds BoringSSL, and those two tools are what that build needs. On Linux the build also needs libclang (`libclang-dev` on Debian and Ubuntu) and the usual Tauri WebKitGTK packages. The scripts in `scripts/` are TypeScript and run through `tsx`, so they do not depend on Node's own TypeScript support.
 
 ```bash
 pnpm install
@@ -137,12 +141,15 @@ The command prints holdout error, last-10 error, 80% coverage, and the row count
 
 ```bash
 pnpm check          # Svelte and TypeScript
-pnpm test:math      # Wilson interval and the small desk helpers
-pnpm test:rust      # season calendar, parser, cache, model
+pnpm test           # vitest: catalog, formatting, sync messages, shared math fixture
+pnpm test:math      # Wilson interval and the small desk helpers, through tsx
+pnpm test:rust      # season calendar, parser, cache, sync merge, model files, shared math fixture
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored live_regular_season
 ```
 
 The ignored test downloads a regular season. It is the check that the client still gets through.
+
+`tests/fixtures/desk-math.json` holds golden cases for the Wilson interval, the median, the mean, the sample deviation, the moving average, and the tail sum. `cargo test` and vitest both read it, so the Rust math and the TypeScript copies cannot drift apart. The stat list for the screens is `src/lib/catalog.json`, and a Rust test checks it against the Rust catalog.
 
 ## Layout
 
@@ -151,6 +158,7 @@ src/                  SvelteKit screens
 src-tauri/src/        Rust commands, cache, sync, and the model
 models/specs/         Priors, one JSON file per stat
 scripts/              The small math check
+tests/fixtures/       Golden cases shared by cargo test and vitest
 ```
 
 ## License

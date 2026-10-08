@@ -6,59 +6,19 @@
   import Prediction from "$lib/components/Prediction.svelte";
   import TrendChart from "$lib/components/TrendChart.svelte";
   import { errorText, loadPlayers, loadTrend } from "$lib/api";
-  import { wilson } from "$lib/deskMath";
-  import { downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
+  import { chipOrder, statShort, windowShort } from "$lib/catalog";
+  import { dnpSentence, downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
   import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
+  import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { PlayerOption, Prediction as Projection, TrendGame, TrendReport } from "$lib/types";
 
-  const SHORT: Record<string, string> = {
-    points: "PTS",
-    rebounds: "REB",
-    assists: "AST",
-    steals: "STL",
-    blocks: "BLK",
-    turnovers: "TOV",
-    three_point_field_goals_made: "3PM",
-    field_goals_made: "FGM",
-    field_goals_attempted: "FGA",
-    free_throws_made: "FTM",
-    points_assists: "P+A",
-    points_rebounds: "P+R",
-    assists_rebounds: "R+A",
-    points_assists_rebounds: "PRA",
-  };
-
-  const WINDOW_SHORT: Record<string, string> = {
-    last_5: "L5",
-    last_10: "L10",
-    last_20: "L20",
-    season: "Season",
-  };
-
-  const STAT_ORDER = [
-    "points",
-    "rebounds",
-    "assists",
-    "three_point_field_goals_made",
-    "points_assists_rebounds",
-    "points_rebounds",
-    "points_assists",
-    "assists_rebounds",
-    "steals",
-    "blocks",
-    "turnovers",
-    "field_goals_made",
-    "field_goals_attempted",
-    "free_throws_made",
-  ];
-
-  const BOX: { key: keyof TrendGame; label: string; stat: string }[] = [
-    { key: "points", label: "PTS", stat: "points" },
-    { key: "rebounds", label: "REB", stat: "rebounds" },
-    { key: "assists", label: "AST", stat: "assists" },
-    { key: "steals", label: "STL", stat: "steals" },
-    { key: "blocks", label: "BLK", stat: "blocks" },
-    { key: "turnovers", label: "TOV", stat: "turnovers" },
+  const BOX: { key: keyof TrendGame; stat: string }[] = [
+    { key: "points", stat: "points" },
+    { key: "rebounds", stat: "rebounds" },
+    { key: "assists", stat: "assists" },
+    { key: "steals", stat: "steals" },
+    { key: "blocks", stat: "blocks" },
+    { key: "turnovers", stat: "turnovers" },
   ];
 
   let players = $state<PlayerOption[]>([]);
@@ -74,9 +34,7 @@
   let appliedUrl = $state("");
   let appliedMedian = $state("");
   let requestId = 0;
-  let seasonRequest = 0;
-  let seasonGames = $state<TrendGame[]>([]);
-  let seasonKey = $state("");
+  let trendKey = "";
   let opponent = $state("");
   let site = $state("home");
   let rest = $state(1);
@@ -175,54 +133,35 @@
   });
 
   $effect(() => {
-    if (!session.ready || playerId == null || !synced) {
-      seasonGames = [];
-      seasonKey = "";
-      return;
-    }
-    const nextSeason = session.season;
-    const nextType = session.seasonType;
-    const nextPlayer = playerId;
-    const nextStat = stat;
-    const key = `${nextSeason}|${nextType}|${nextPlayer}|${nextStat}`;
-    const id = ++seasonRequest;
-    loadTrend({
-      season: nextSeason,
-      seasonType: nextType,
-      playerId: nextPlayer,
-      stat: nextStat,
-      window: "season",
-      line: 0,
-    })
-      .then((next) => {
-        if (id !== seasonRequest) return;
-        seasonKey = key;
-        seasonGames = next.games;
-      })
-      .catch((caught: unknown) => {
-        if (id !== seasonRequest) return;
-        seasonGames = [];
-        seasonKey = "";
-        deskError = errorText(caught);
-      });
-  });
-
-  $effect(() => {
     if (!session.ready || playerId == null || !synced) return;
     const medianKey = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
     const held = lineHeld;
     const currentLine = Number.isFinite(line) ? line : 0;
-    const id = ++requestId;
-    loading = true;
-    deskError = null;
-    loadTrend({
+    const query = {
       season: session.season,
       seasonType: session.seasonType,
       playerId,
       stat,
       window: windowId,
       line: currentLine,
-    })
+    };
+    // A new player, stat, or window asks right away. Typing the number waits for a pause.
+    const key = `${medianKey}|${windowId}`;
+    const delay = key === trendKey ? INPUT_DELAY_MS : 0;
+    trendKey = key;
+    return later(() => requestTrend(query, medianKey, held, currentLine), delay);
+  });
+
+  function requestTrend(
+    query: Parameters<typeof loadTrend>[0],
+    medianKey: string,
+    held: boolean,
+    currentLine: number,
+  ) {
+    const id = ++requestId;
+    loading = true;
+    deskError = null;
+    loadTrend(query)
       .then((next) => {
         if (id !== requestId) return;
         if (!held && appliedMedian !== medianKey && next.summary.median != null) {
@@ -244,7 +183,7 @@
       .finally(() => {
         if (id === requestId) loading = false;
       });
-  });
+  }
 
   function selectPlayer(id: number) {
     playerId = id;
@@ -262,10 +201,6 @@
     line = round1(report.summary.median);
   }
 
-  function shortStat(id: string, label: string): string {
-    return SHORT[id] ?? label;
-  }
-
   function signed(value: number, against: number): string {
     const delta = round1(value - against);
     if (delta === 0) return "0";
@@ -273,54 +208,23 @@
     return delta > 0 ? `+${body}` : `−${body}`;
   }
 
-  let orderedStats = $derived(
-    [...session.stats].sort(
-      (left, right) => STAT_ORDER.indexOf(left.id) - STAT_ORDER.indexOf(right.id),
-    ),
-  );
+  let orderedStats = $derived(chipOrder(session.stats));
 
-  let splits = $derived.by(() => {
-    const key = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
-    const source = seasonKey === key ? seasonGames : [];
-    return session.windows.map((item) => {
-      const size = item.id === "last_5" ? 5 : item.id === "last_10" ? 10 : item.id === "last_20" ? 20 : null;
-      const games = size == null || source.length <= size ? source : source.slice(-size);
-      const sample = games.length;
-      const overs = games.filter((game) => game.stat >= mark).length;
-      return {
-        id: item.id,
-        short: WINDOW_SHORT[item.id] ?? item.label,
-        overs,
-        sample,
-        rate: sample ? overs / sample : null,
-      };
-    });
-  });
+  // Rust scores all four windows against the line in the same report.
+  let splits = $derived(
+    (report?.splits ?? []).map((item) => ({
+      id: item.window,
+      short: windowShort(item.window),
+      overs: item.overs,
+      sample: item.sample,
+      rate: item.hitRate,
+      low: item.wilsonLow,
+      high: item.wilsonHigh,
+      dnp: item.dnp,
+    })),
+  );
 
   let activeSplit = $derived(splits.find((item) => item.id === windowId) ?? null);
-  let activeBand = $derived(
-    activeSplit && activeSplit.sample > 0 ? wilson(activeSplit.overs, activeSplit.sample) : null,
-  );
-
-  function dayNumber(iso: string): number {
-    const [year, month, day] = iso.split("-").map(Number);
-    return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
-  }
-
-  let restGap = $derived.by(() => {
-    const key = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
-    const source = seasonKey === key ? seasonGames : [];
-    const gaps = new Map<string, number | null>();
-    let previous: string | null = null;
-    for (const game of source) {
-      gaps.set(
-        game.gameId,
-        previous == null ? null : dayNumber(game.gameDate) - dayNumber(previous) - 1,
-      );
-      previous = game.gameDate;
-    }
-    return gaps;
-  });
 
   let cuts = $derived.by(() => {
     if (!report) return [];
@@ -329,21 +233,12 @@
       overs: picked.filter((game) => game.over).length,
       sample: picked.length,
     });
-    const restReady = seasonKey === `${session.season}|${session.seasonType}|${playerId}|${stat}`;
-    const rows = [
+    return [
       { label: "Home", ...count(games.filter((game) => game.location === "home")) },
       { label: "Away", ...count(games.filter((game) => game.location === "away")) },
+      { label: "Back-to-back", ...count(games.filter((game) => game.restDays === 0)) },
+      { label: "Rested", ...count(games.filter((game) => (game.restDays ?? 1) > 0)) },
     ];
-    if (restReady) {
-      rows.push(
-        { label: "Back-to-back", ...count(games.filter((game) => restGap.get(game.gameId) === 0)) },
-        {
-          label: "Rested",
-          ...count(games.filter((game) => (restGap.get(game.gameId) ?? 1) > 0)),
-        },
-      );
-    }
-    return rows;
   });
 </script>
 
@@ -378,7 +273,7 @@
               lineHeld = false;
             }}
           >
-            {shortStat(item.id, item.label)}
+            {statShort(item.id, item.label)}
           </button>
         {/each}
       </div>
@@ -492,7 +387,7 @@
     <section class="room trend-room">
       <header>
         <p class="kicker">Trend</p>
-        <h2>How often the games were {formatLine(mark)} {(report.statLabel).toLowerCase()} or more</h2>
+        <h2>How often the games were {formatLine(report.line)} {(report.statLabel).toLowerCase()} or more</h2>
       </header>
     <div class="splits" role="group" aria-label="How often the games reached the number">
       {#each splits as item (item.id)}
@@ -514,12 +409,15 @@
 
     {#if activeSplit && activeSplit.sample > 0}
       <p class="band">
-        {activeSplit.overs} of {activeSplit.sample} were {formatLine(mark)} or more.
-        {#if activeBand}
-          A 95% interval on that rate is {(activeBand.low * 100).toFixed(0)}–{(activeBand.high * 100).toFixed(0)}%.
+        {activeSplit.overs} of {activeSplit.sample} were {formatLine(report.line)} or more.
+        {#if activeSplit.low != null && activeSplit.high != null}
+          A 95% interval on that rate is {(activeSplit.low * 100).toFixed(0)}–{(activeSplit.high * 100).toFixed(0)}%.
         {/if}
         {#if activeSplit.sample < 30}
           {activeSplit.sample} games is a small sample, so that interval is wide.
+        {/if}
+        {#if activeSplit.dnp > 0}
+          {dnpSentence(activeSplit.dnp)}
         {/if}
       </p>
     {/if}
@@ -572,11 +470,11 @@
             <th class="left">Date</th>
             <th class="left">Opp</th>
             <th>Min</th>
-            <th>{shortStat(report.stat, report.statLabel)}</th>
+            <th>{statShort(report.stat, report.statLabel)}</th>
             <th>vs {formatLine(report.line)}</th>
             {#each BOX as column (column.key)}
               {#if column.stat !== report.stat}
-                <th>{column.label}</th>
+                <th>{statShort(column.stat)}</th>
               {/if}
             {/each}
             <th>+/−</th>

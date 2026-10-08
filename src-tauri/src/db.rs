@@ -69,24 +69,45 @@ fn init(connection: &Connection) -> AppResult<()> {
     Ok(())
 }
 
-pub fn replace_logs(
+/// A sync under this share of the cached rows is treated as a bad response.
+const SHORT_SYNC_SHARE: f64 = 0.5;
+
+/// Merges a sync into the cache. Rows are upserted by game, and cached rows the
+/// response left out stay. An empty response, or one under half of what is
+/// cached, writes nothing and comes back with a warning instead.
+pub fn merge_logs(
     connection: &Connection,
     season: &str,
     season_type: &str,
     games: &[GameLog],
 ) -> AppResult<SyncReport> {
+    let (cached_games, cached_players) = cached_counts(connection, season, season_type)?;
+    let short = (games.len() as f64) < cached_games as f64 * SHORT_SYNC_SHARE;
+    if games.is_empty() || short {
+        let warning = if games.is_empty() && cached_games == 0 {
+            format!("NBA returned 0 rows for {season} {season_type}. Nothing was cached.")
+        } else if games.is_empty() {
+            format!(
+                "NBA returned 0 rows for {season} {season_type}. The {cached_games} cached games were kept."
+            )
+        } else {
+            format!(
+                "NBA returned {} rows for {season} {season_type}, under half of the {cached_games} cached. The cache was kept. Sync again later.",
+                games.len()
+            )
+        };
+        return Ok(SyncReport {
+            season: season.to_string(),
+            season_type: season_type.to_string(),
+            games: cached_games,
+            players: cached_players,
+            fetched: games.len(),
+            synced_at: synced_at(connection, season, season_type)?,
+            warning: Some(warning),
+        });
+    }
     let synced_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let players = {
-        let mut ids: Vec<i64> = games.iter().map(|game| game.player_id).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        ids.len()
-    };
     let transaction = connection.unchecked_transaction()?;
-    transaction.execute(
-        "DELETE FROM game_logs WHERE season = ?1 AND season_type = ?2",
-        params![season, season_type],
-    )?;
     {
         let mut statement = transaction.prepare(
             "INSERT OR REPLACE INTO game_logs (
@@ -120,6 +141,7 @@ pub fn replace_logs(
             ])?;
         }
     }
+    let (total_games, total_players) = cached_counts(&transaction, season, season_type)?;
     transaction.execute(
         "INSERT INTO sync_meta (season, season_type, synced_at, games, players)
          VALUES (?1, ?2, ?3, ?4, ?5)
@@ -127,16 +149,37 @@ pub fn replace_logs(
             synced_at = excluded.synced_at,
             games = excluded.games,
             players = excluded.players",
-        params![season, season_type, synced_at, games.len() as i64, players as i64],
+        params![season, season_type, synced_at, total_games as i64, total_players as i64],
     )?;
     transaction.commit()?;
     Ok(SyncReport {
         season: season.to_string(),
         season_type: season_type.to_string(),
-        games: games.len(),
-        players,
-        synced_at,
+        games: total_games,
+        players: total_players,
+        fetched: games.len(),
+        synced_at: Some(synced_at),
+        warning: None,
     })
+}
+
+fn cached_counts(connection: &Connection, season: &str, season_type: &str) -> AppResult<(usize, usize)> {
+    let (games, players): (i64, i64) = connection.query_row(
+        "SELECT COUNT(*), COUNT(DISTINCT player_id) FROM game_logs WHERE season = ?1 AND season_type = ?2",
+        params![season, season_type],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok((games.max(0) as usize, players.max(0) as usize))
+}
+
+fn synced_at(connection: &Connection, season: &str, season_type: &str) -> AppResult<Option<String>> {
+    let mut statement =
+        connection.prepare("SELECT synced_at FROM sync_meta WHERE season = ?1 AND season_type = ?2")?;
+    let mut rows = statement.query(params![season, season_type])?;
+    match rows.next()? {
+        Some(row) => Ok(Some(row.get(0)?)),
+        None => Ok(None),
+    }
 }
 
 pub fn statuses(connection: &Connection) -> AppResult<Vec<SeasonStatus>> {
@@ -276,34 +319,112 @@ mod tests {
     }
 
     #[test]
-    fn latest_team_wins_and_a_resync_replaces_the_season() {
+    fn latest_team_wins_and_a_resync_updates_the_season() {
         let connection = open_memory().unwrap();
         let first = vec![
             sample(7, "A Player", "DEN", "2026-01-01", 20),
             sample(7, "A Player", "MIN", "2026-02-01", 30),
             sample(8, "B Player", "BOS", "2026-01-04", 18),
         ];
-        let report = replace_logs(&connection, "2025-26", "Regular Season", &first).unwrap();
+        let report = merge_logs(&connection, "2025-26", "Regular Season", &first).unwrap();
         assert_eq!(report.games, 3);
         assert_eq!(report.players, 2);
+        assert!(report.warning.is_none());
         let listed = players(&connection, "2025-26", "Regular Season").unwrap();
         assert_eq!(listed[0].team, "MIN");
         assert_eq!(listed[0].games, 2);
 
-        replace_logs(
-            &connection,
-            "2025-26",
-            "Regular Season",
-            &[sample(7, "A Player", "DEN", "2026-03-01", 12)],
-        )
-        .unwrap();
+        let mut corrected = first.clone();
+        corrected[0].pts = 22;
+        corrected.push(sample(7, "A Player", "MIN", "2026-03-01", 12));
+        let report = merge_logs(&connection, "2025-26", "Regular Season", &corrected).unwrap();
+        assert_eq!((report.games, report.fetched), (4, 4));
         let games = player_games(&connection, "2025-26", "Regular Season", 7).unwrap();
-        assert_eq!(games.len(), 1);
-        assert_eq!(games[0].pts, 12);
+        assert_eq!(games.len(), 3);
+        assert_eq!(games[0].pts, 22);
+        assert_eq!(games[2].pts, 12);
         let status = statuses(&connection).unwrap();
-        assert_eq!(status[0].games, 1);
-        assert_eq!(status[0].players, 1);
-        assert_eq!(status[0].first_game.as_deref(), Some("2026-03-01"));
+        assert_eq!(status[0].games, 4);
+        assert_eq!(status[0].players, 2);
+        assert_eq!(status[0].first_game.as_deref(), Some("2026-01-01"));
         assert_eq!(status[0].last_game.as_deref(), Some("2026-03-01"));
+    }
+
+    fn season_of(count: usize) -> Vec<GameLog> {
+        (0..count)
+            .map(|day| {
+                let date = format!("2026-01-{:02}", day % 28 + 1);
+                let mut game = sample(day as i64 / 28 + 1, "P", "DEN", &date, 10 + day as i32);
+                game.game_id = format!("g{day}");
+                game
+            })
+            .collect()
+    }
+
+    #[test]
+    fn an_empty_sync_keeps_the_cache() {
+        let connection = open_memory().unwrap();
+        merge_logs(&connection, "2025-26", "Regular Season", &season_of(40)).unwrap();
+        let before = statuses(&connection).unwrap();
+        let report = merge_logs(&connection, "2025-26", "Regular Season", &[]).unwrap();
+        let warning = report.warning.expect("an empty sync warns");
+        assert!(warning.contains("0 rows") && warning.contains("kept"), "{warning}");
+        assert_eq!((report.games, report.fetched), (40, 0));
+        assert_eq!(report.synced_at, before[0].synced_at);
+        assert_eq!(season_games(&connection, "2025-26", "Regular Season").unwrap().len(), 40);
+        assert_eq!(statuses(&connection).unwrap()[0].games, 40);
+    }
+
+    #[test]
+    fn an_empty_sync_of_an_empty_season_writes_nothing() {
+        let connection = open_memory().unwrap();
+        let report = merge_logs(&connection, "2025-26", "Playoffs", &[]).unwrap();
+        assert!(report.warning.unwrap().contains("Nothing was cached"));
+        assert_eq!(report.synced_at, None);
+        assert!(statuses(&connection).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_short_sync_keeps_the_cache() {
+        let connection = open_memory().unwrap();
+        let full = season_of(40);
+        merge_logs(&connection, "2025-26", "Regular Season", &full).unwrap();
+        let mut short = full[..15].to_vec();
+        short[0].pts = 99;
+        let report = merge_logs(&connection, "2025-26", "Regular Season", &short).unwrap();
+        assert!(report.warning.unwrap().contains("under half"));
+        assert_eq!((report.games, report.fetched), (40, 15));
+        let games = season_games(&connection, "2025-26", "Regular Season").unwrap();
+        assert_eq!(games.len(), 40);
+        assert!(games.iter().all(|game| game.pts != 99), "a short sync writes nothing");
+    }
+
+    #[test]
+    fn a_partial_sync_merges_into_the_cache() {
+        let connection = open_memory().unwrap();
+        let full = season_of(40);
+        merge_logs(&connection, "2025-26", "Regular Season", &full).unwrap();
+        let mut partial = full[..30].to_vec();
+        partial[0].pts = 77;
+        let mut extra = sample(9, "C Player", "BOS", "2026-02-01", 31);
+        extra.game_id = "g-new".to_string();
+        partial.push(extra);
+        let report = merge_logs(&connection, "2025-26", "Regular Season", &partial).unwrap();
+        assert!(report.warning.is_none());
+        assert_eq!((report.games, report.fetched), (41, 31));
+        let games = season_games(&connection, "2025-26", "Regular Season").unwrap();
+        assert_eq!(games.len(), 41);
+        assert!(games.iter().any(|game| game.pts == 77), "the response row replaced the cached one");
+        assert!(games.iter().any(|game| game.game_id == "g39"), "rows the response left out stay");
+        assert_eq!(statuses(&connection).unwrap()[0].games, 41);
+    }
+
+    #[test]
+    fn seasons_and_types_do_not_touch_each_other() {
+        let connection = open_memory().unwrap();
+        merge_logs(&connection, "2025-26", "Regular Season", &season_of(40)).unwrap();
+        merge_logs(&connection, "2025-26", "Playoffs", &season_of(3)).unwrap();
+        assert_eq!(season_games(&connection, "2025-26", "Regular Season").unwrap().len(), 40);
+        assert_eq!(season_games(&connection, "2025-26", "Playoffs").unwrap().len(), 3);
     }
 }

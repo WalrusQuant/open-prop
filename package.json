@@ -10,7 +10,8 @@
     "check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "tauri": "tauri",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "test:math": "node scripts/check-desk-math.ts"
+    "test:math": "tsx scripts/check-desk-math.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@fontsource/ibm-plex-mono": "^5.2.6",
@@ -30,7 +31,9 @@
     "@types/d3": "^7.4.3",
     "svelte": "^5.39.0",
     "svelte-check": "^4.3.1",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.2",
-    "vite": "^7.1.4"
+    "vite": "^7.1.4",
+    "vitest": "^4.1.11"
   }
 }

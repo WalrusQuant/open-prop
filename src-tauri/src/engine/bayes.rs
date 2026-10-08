@@ -248,6 +248,27 @@ mod tests {
         assert!((at_least(&pmf, 1.5) - 0.6).abs() < 1e-12);
     }
 
+    /// vitest reads the same cases, so the player page's tail sum agrees with this one.
+    #[test]
+    fn at_least_matches_the_shared_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/desk-math.json")).unwrap();
+        let pmf: Vec<f64> = fixture["atLeast"]["pmf"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_f64().unwrap())
+            .collect();
+        for case in fixture["atLeast"]["cases"].as_array().unwrap() {
+            let line = case["line"].as_f64().unwrap();
+            let expected = case["expected"].as_f64().unwrap();
+            let actual = at_least(&pmf, line);
+            assert!((actual - expected).abs() < 1e-9, "line {line}: {actual} vs {expected}");
+        }
+        let empty = &fixture["atLeastEmpty"];
+        assert_eq!(at_least(&[], empty["line"].as_f64().unwrap()), 0.0);
+    }
+
     #[test]
     fn convolution_adds_the_supports() {
         let sum = convolve(&[0.0, 1.0], &[0.0, 0.0, 1.0]);

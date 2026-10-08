@@ -1,4 +1,12 @@
-/** Same definitions as the Rust desk. The desktop app uses the Rust copy. */
+/**
+ * Same definitions as the Rust desk (`stats.rs`, `engine/bayes.rs`).
+ *
+ * The desktop app gets the splits, Wilson bands, averages, and medians from Rust. These copies
+ * only feed the browser preview's invented backend in `preview.ts`. `atLeast` is the exception:
+ * the player page sums the model's tail with it so editing the number does not wait on a round
+ * trip. `tests/fixtures/desk-math.json` is checked by both `cargo test` and vitest, so the two
+ * languages cannot drift.
+ */
 
 export function movingAverage(values: number[], width = 3): Array<number | null> {
   return values.map((_, index) => {

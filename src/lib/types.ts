@@ -24,9 +24,14 @@ export interface Bootstrap {
 export interface SyncReport {
   season: string;
   seasonType: string;
+  /** Games and players in the cache after the sync. */
   games: number;
   players: number;
-  syncedAt: string;
+  /** Rows the NBA response carried. */
+  fetched: number;
+  syncedAt: string | null;
+  /** Set when the response was empty or short and the cache was kept. */
+  warning: string | null;
 }
 
 export interface PlayerOption {
@@ -56,6 +61,8 @@ export interface TrendGame {
   stat: number;
   over: boolean;
   movingAvg: number | null;
+  /** Days off before this game, counted from his previous game played. Null for his first. */
+  restDays: number | null;
   points: number;
   rebounds: number;
   assists: number;
@@ -76,6 +83,19 @@ export interface TrendSummary {
   sd: number | null;
   min: number | null;
   max: number | null;
+  /** 0-minute games in the window's span. They are not in the sample. */
+  dnp: number;
+}
+
+/** One window against the line. Rust scores all four so the page does no hit-rate math. */
+export interface TrendSplit {
+  window: string;
+  sample: number;
+  overs: number;
+  hitRate: number | null;
+  wilsonLow: number | null;
+  wilsonHigh: number | null;
+  dnp: number;
 }
 
 export interface TrendReport {
@@ -91,6 +111,8 @@ export interface TrendReport {
   line: number;
   games: TrendGame[];
   summary: TrendSummary;
+  /** Last 5, last 10, last 20, and the season against the same line. */
+  splits: TrendSplit[];
 }
 
 export interface BoardQuery {
@@ -110,7 +132,9 @@ export interface BoardRow {
   playerId: number;
   name: string;
   team: string;
+  /** Games played. 0-minute games are left out of every split. */
   games: number;
+  dnp: number;
   mean: number;
   last5: BoardSplit;
   last10: BoardSplit;

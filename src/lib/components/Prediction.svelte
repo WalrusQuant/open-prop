@@ -2,6 +2,7 @@
   import { errorText, inTauri, loadPrediction } from "$lib/api";
   import { atLeast } from "$lib/deskMath";
   import { formatLine, formatStat } from "$lib/format";
+  import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { Prediction } from "$lib/types";
 
   let {
@@ -40,6 +41,7 @@
   let modelError = $state<string | null>(null);
   let shownFor = $state("");
   let request = 0;
+  let askedFor = "";
 
   let desktop = $derived(inTauri());
 
@@ -70,8 +72,7 @@
       onprojection(null);
       return;
     }
-    const id = ++request;
-    loadPrediction({
+    const query = {
       season: currentSeason,
       seasonType: currentType,
       playerId: currentPlayer,
@@ -82,19 +83,27 @@
       restDays: currentRest,
       minutes: currentMinutes,
       window: currentWindow,
-    })
-      .then((next) => {
-        if (id !== request) return;
-        prediction = next;
-        modelError = null;
-        onprojection(next);
-      })
-      .catch((caught: unknown) => {
-        if (id !== request) return;
-        prediction = null;
-        modelError = errorText(caught);
-        onprojection(null);
-      });
+    };
+    // A new player, stat, or window asks right away. Typing rest or minutes waits for a pause.
+    const key = `${currentSeason}|${currentType}|${currentPlayer}|${currentStat}|${currentWindow}`;
+    const delay = key === askedFor ? INPUT_DELAY_MS : 0;
+    askedFor = key;
+    return later(() => {
+      const id = ++request;
+      loadPrediction(query)
+        .then((next) => {
+          if (id !== request) return;
+          prediction = next;
+          modelError = null;
+          onprojection(next);
+        })
+        .catch((caught: unknown) => {
+          if (id !== request) return;
+          prediction = null;
+          modelError = errorText(caught);
+          onprojection(null);
+        });
+    }, delay);
   });
 
   let chance = $derived(

@@ -61,3 +61,21 @@ Model check, after the block was added:
 - `cargo test --lib`: 25 passed, 1 ignored. `pnpm check` clean.
 - Preview at localhost:1420 shows the Model block, leaves Train disabled, and keeps the hit rates, chart, and home/away split. Changing opponent, site, rest, and minutes does not invent a number. Method states the leakage rule and the holdout. Phone width does not overflow.
 - Train against the real cache has not been clicked. The desktop app was not opened.
+
+## Review fixes (October 2026)
+
+From the October code review. Branch `review-fixes-2026-10`.
+
+- [x] Tooling: vitest (`pnpm test`), `pnpm test:math` through tsx on Node 20, `pnpm test:rust` building with cmake, nasm, and libclang.
+- [x] Sync merges. An empty or short response (under half the cached games) keeps the cache and shows a warning.
+- [x] One fit at a time, held by the backend. Model files are written to a temp file and renamed. The model cache cannot pin a model from before a train.
+- [x] Fits are kept per stat, season, and season type. Old single-file models move to their own season on start.
+- [x] 0-minute games are left out of hit rates on the board, the trend, and the player page, the same as the model. The player page and the board show the DNP count.
+- [x] Rust scores all four splits, their Wilson bands, and rest days. `atLeast` stays in TypeScript so a number edit does not wait on Rust; a shared fixture pins it to the Rust copy. One stat catalog in `src/lib/catalog.json`.
+- [x] Deleted `engine/features.rs` and `engine/posterior.rs`.
+- [x] Boot errors show the real message. The board line, the player number, and the model spot wait 200 ms after typing. Predict reads one player's games.
+- [ ] CSP is still `null`. A strict policy needs a run in the Tauri webview to confirm SvelteKit's inline boot script and the fonts still load.
+- [ ] Read commands still run on the main thread (review B4). Moving them to `async` is the next step if the window stutters during a sync.
+
+`cargo test --lib`: 45 passed, 1 ignored. vitest: 19 passed. `pnpm check`: 0 errors. `pnpm build` clean. Checked in the browser preview, not in the Tauri webview.
+

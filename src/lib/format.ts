@@ -45,6 +45,14 @@ export function hitSentence(report: TrendReport): string {
   return `${overs} of ${sample} games reached ${formatLine(report.line)} ${unit}.`;
 }
 
+/** 0-minute games are left out of every hit rate. Empty when there are none. */
+export function dnpSentence(count: number): string {
+  if (!Number.isFinite(count) || count <= 0) return "";
+  return count === 1
+    ? "1 game at 0 minutes (DNP) is left out."
+    : `${count} games at 0 minutes (DNP) are left out.`;
+}
+
 export function intervalSentence(report: TrendReport): string {
   const { sample, wilsonLow, wilsonHigh } = report.summary;
   if (sample === 0 || wilsonLow == null || wilsonHigh == null) {

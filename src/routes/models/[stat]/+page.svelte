@@ -1,16 +1,10 @@
 <script lang="ts">
   import { page } from "$app/stores";
   import { errorText, inTauri, loadModelScores } from "$lib/api";
+  import { statParts } from "$lib/catalog";
   import { formatWhen } from "$lib/format";
   import { currentStatus, session } from "$lib/session.svelte";
   import type { TrainStatReport } from "$lib/types";
-
-  const PARTS: Record<string, string> = {
-    points_assists: "points and assists",
-    points_rebounds: "points and rebounds",
-    assists_rebounds: "assists and rebounds",
-    points_assists_rebounds: "points, rebounds, and assists",
-  };
 
   let rows = $state<TrainStatReport[]>([]);
   let loadError = $state<string | null>(null);
@@ -23,7 +17,7 @@
   let row = $derived(rows.find((item) => item.stat === statId) ?? null);
   let status = $derived(currentStatus());
   let fitted = $derived(row != null && row.error == null && row.trainRows > 0);
-  let parts = $derived(PARTS[statId] ?? null);
+  let parts = $derived(statParts(statId));
   let stale = $derived(
     row?.fittedAt != null && status?.syncedAt != null && row.fittedAt < status.syncedAt,
   );

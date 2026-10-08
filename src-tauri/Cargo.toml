@@ -5,7 +5,7 @@ description = "Open NBA prop desk"
 authors = ["Adam Wickwire"]
 license = "Apache-2.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.90"
 default-run = "open-prop"
 
 [lib]

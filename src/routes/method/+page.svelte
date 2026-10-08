@@ -13,6 +13,11 @@
     and all three. There is no odds feed, so the line is yours. Median fills it from the games in
     the window until you type a different number.
   </p>
+  <p>
+    A game with 0 minutes is a did-not-play. It is not a miss. The hit rates, the board, and the
+    model all leave it out, so the last 10 is the last 10 games he played. The player page says how
+    many were left out.
+  </p>
 
   <h2>The hit rate</h2>
   <p>
