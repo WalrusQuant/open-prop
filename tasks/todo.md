@@ -92,6 +92,7 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [ ] A time decay on the rate carry. At the end of 2025-26 the carry is within 0.02 holdout MAE of no carry on points and PRA; a decay could close that.
 - [ ] Per-stat `carry_minutes`. Only points, rebounds, assists, threes, and PRA were backtested; the other nine use the same 1000.
 - [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player is priced at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
-- [ ] The playoff list at 0 games is every regular-season player, because playoffs carry the regular season and the roster call does not know who made the playoffs.
-- [ ] The roster only drops carried players without a game this season. A player waived mid-season keeps his row until the season is refit.
+- [x] Playoff list. Syncing Playoffs stores `leaguestandingsv3` clinch/play-in teams; once playoff games exist those teams win. Fallback is the wide list plus a sync note.
+- [x] Mid-season roster. Every sync of the roster season refreshes `commonallplayers`. Roster overrides team and board membership; waived players stay labelled "Not on a roster".
+- [ ] Rookie prior from draft position. Rookies are labelled "Rookie, needs 5 games" and still wait for five.
 - [ ] Clicked through in the browser preview only, not in the Tauri webview.

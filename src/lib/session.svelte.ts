@@ -74,10 +74,14 @@ export async function syncCurrent() {
     const report = await syncSeason(session.season, session.seasonType);
     const roster =
       report.rosterPlayers != null ? ` Rosters list ${report.rosterPlayers.toLocaleString()} players.` : "";
+    const playoffs =
+      report.playoffTeams != null
+        ? ` Playoff field lists ${report.playoffTeams.toLocaleString()} teams.`
+        : "";
     if (report.warning) {
-      session.warning = `${report.warning}${roster}`;
+      session.warning = `${report.warning}${roster}${playoffs}`;
     } else {
-      session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.${roster}`;
+      session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.${roster}${playoffs}`;
     }
     const data = await loadBootstrap();
     session.seasons = data.seasons;

@@ -259,3 +259,10 @@ prior alone against carry 1000:
 | PRA | 6.431 → 3.705 | 9.562 → 4.551 | 0.1936 → 0.0871 | 0.1934 → 0.0386 |
 
 2024-25 (447 first games) moved the same way: PTS LL 5.624 → 3.156, PRA 6.338 → 3.543.
+
+## Roster gaps (follow-up)
+
+Playoffs filter to `leaguestandingsv3` clinch/play-in teams (20 for 2024-25 and 2025-26 live),
+then to teams in cached playoff games. Mid-season, every roster-season sync refreshes
+`commonallplayers`; waived players stay labelled off-roster and leave the board; traded
+players take the roster team.

@@ -94,11 +94,13 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
   </p>
   <p>
     Before opening night the player list is this season's rosters and everyone from last season.
-    A sync of the current season asks stats.nba.com for the rosters, so a player on no roster drops
-    out and a traded player shows his new team. If that call fails, his team is the last one he
-    played for, and his page says so. With no games yet, the trend says so and shows last season's
-    hit rate, labelled. On each carried player's first game of 2025-26, the carry cut points log
-    loss from 5.83 to 3.31 against the role prior alone.
+    A sync of the current season asks stats.nba.com for the rosters again each time, so a traded
+    player's team is the roster team and a waived player stays listed as "Not on a roster" (the
+    board leaves him out). If that call fails, the stored roster is kept. Playoffs ask
+    leaguestandingsv3 for clinched and play-in teams; once playoff games are cached those teams
+    are the list. With no games yet, the trend says so and shows last season's hit rate, labelled.
+    On each carried player's first game of 2025-26, the carry cut points log loss from 5.83 to
+    3.31 against the role prior alone.
   </p>
   <p>
     The spec for each stat is <code>models/specs</code> in the source tree: prior minutes, opponent

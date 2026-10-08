@@ -185,13 +185,18 @@ export function previewPlayers(
   const cached = cachedInPreview(season, seasonType);
   const carried = carry && season === "2026-27" && seasonType === PREVIEW_TYPE;
   if (!cached && !carried) return [];
-  return PLAYERS.map((player) => ({
-    playerId: player.playerId,
-    name: player.name,
-    team: player.team,
-    games: cached ? ROWS.filter((row) => row.playerId === player.playerId).length : 0,
-    teamSource: cached ? "season" : "lastSeason",
-  }));
+  return PLAYERS.map((player) => {
+    const games = cached ? ROWS.filter((row) => row.playerId === player.playerId).length : 0;
+    return {
+      playerId: player.playerId,
+      name: player.name,
+      team: player.team,
+      games,
+      teamSource: cached ? "season" : "lastSeason",
+      rookie: false,
+      onBoard: true,
+    };
+  });
 }
 
 export function previewTrend(query: TrendQuery): TrendReport {
