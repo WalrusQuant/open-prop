@@ -32,13 +32,28 @@ export interface SyncReport {
   syncedAt: string | null;
   /** Set when the response was empty or short and the cache was kept. */
   warning: string | null;
+  /** Players on this season's rosters, when the roster call ran and answered. */
+  rosterPlayers: number | null;
 }
+
+/** Where a listed team comes from: his latest game this season, the roster call, or last season. */
+export type TeamSource = "season" | "roster" | "lastSeason";
 
 export interface PlayerOption {
   playerId: number;
   name: string;
   team: string;
+  /** Games this season. 0 means he is listed from last season or the roster. */
   games: number;
+  teamSource: TeamSource;
+}
+
+/** A whole carried season scored against the number. */
+export interface LastSeason {
+  /** "2025-26 Regular Season". */
+  season: string;
+  split: TrendSplit;
+  median: number | null;
 }
 
 export interface TrendQuery {
@@ -113,6 +128,11 @@ export interface TrendReport {
   summary: TrendSummary;
   /** Last 5, last 10, last 20, and the season against the same line. */
   splits: TrendSplit[];
+  /** True when he has no games this season. The games and splits are empty. */
+  noGames: boolean;
+  teamSource: TeamSource;
+  /** His carried season against the same line, only when this season has no games. */
+  lastSeason: LastSeason | null;
 }
 
 export interface BoardQuery {
@@ -145,6 +165,8 @@ export interface BoardRow {
 export interface TrainQuery {
   season: string;
   seasonType: string;
+  /** Carry last season into the priors when it is cached. The app defaults to true. */
+  seed?: boolean;
 }
 
 export interface TrainStatReport {
@@ -163,12 +185,18 @@ export interface TrainStatReport {
   homeMultiplier: number | null;
   restPerDay: number | null;
   settingsStored: boolean;
+  /** "2024-25 Regular Season" when the fit carried that season. */
+  seededFrom: string | null;
+  carryMinutes: number | null;
+  opponentCarryMinutes: number | null;
 }
 
 export interface TrainReport {
   season: string;
   seasonType: string;
   stats: TrainStatReport[];
+  /** Set when a carry was asked for but its season is not cached. */
+  seedNote: string | null;
 }
 
 export interface PredictQuery {
@@ -200,4 +228,6 @@ export interface Prediction {
   holdoutCoverage: number | null;
   trainRows: number;
   holdoutRows: number;
+  /** Set while last season's carry outweighs this season's games. */
+  priorFrom: string | null;
 }

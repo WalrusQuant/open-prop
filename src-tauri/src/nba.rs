@@ -6,9 +6,11 @@ use wreq::Client;
 use wreq_util::Emulation;
 
 use crate::error::{AppError, AppResult};
-use crate::models::GameLog;
+use crate::models::{GameLog, RosterEntry};
 
 const GAME_LOGS_URL: &str = "https://stats.nba.com/stats/playergamelogs";
+/// Every player on a team for the season, one request for the league.
+const ROSTER_URL: &str = "https://stats.nba.com/stats/commonallplayers";
 
 /// stats.nba.com answers a browser TLS fingerprint and returns nothing to a
 /// plain Rust or curl client. wreq sends the Chrome 136 fingerprint that the
@@ -32,6 +34,17 @@ impl NbaClient {
     pub async fn player_game_logs(&self, season: &str, season_type: &str) -> AppResult<Vec<GameLog>> {
         let body = self.get_logs(season, season_type).await?;
         parse_player_game_logs(&body, season, season_type)
+    }
+
+    /// Players on an NBA roster for `season`, with their team. Free agents are left out.
+    pub async fn roster(&self, season: &str) -> AppResult<Vec<RosterEntry>> {
+        let params = [
+            ("IsOnlyCurrentSeason", "1"),
+            ("LeagueID", "00"),
+            ("Season", season),
+        ];
+        let body = self.get_with_retries(ROSTER_URL, &params).await?;
+        parse_roster(&body)
     }
 
     async fn get_logs(&self, season: &str, season_type: &str) -> AppResult<String> {
@@ -58,9 +71,13 @@ impl NbaClient {
             ("VsConference", ""),
             ("VsDivision", ""),
         ];
+        self.get_with_retries(GAME_LOGS_URL, &params).await
+    }
+
+    async fn get_with_retries(&self, url: &str, params: &[(&str, &str)]) -> AppResult<String> {
         let mut last_error = None;
         for attempt in 0..3 {
-            match self.get_once(&params).await {
+            match self.get_once(url, params).await {
                 Ok(body) => return Ok(body),
                 Err(error) => {
                     last_error = Some(error);
@@ -71,10 +88,10 @@ impl NbaClient {
         Err(last_error.unwrap_or_else(|| AppError::message("the NBA stats request failed")))
     }
 
-    async fn get_once(&self, params: &[(&str, &str)]) -> AppResult<String> {
+    async fn get_once(&self, url: &str, params: &[(&str, &str)]) -> AppResult<String> {
         let response = self
             .http
-            .get(GAME_LOGS_URL)
+            .get(url)
             .header("Accept", "application/json, text/plain, */*")
             .header("Accept-Language", "en-US,en;q=0.9")
             .header("Origin", "https://www.nba.com")
@@ -96,7 +113,28 @@ impl NbaClient {
     }
 }
 
-pub fn parse_player_game_logs(body: &str, season: &str, season_type: &str) -> AppResult<Vec<GameLog>> {
+/// Reads `commonallplayers`. A player counts when he is on a roster and has a team.
+pub fn parse_roster(body: &str) -> AppResult<Vec<RosterEntry>> {
+    let (columns, rows) = result_set(body)?;
+    let mut players = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        let team = text_at(row, &columns, "TEAM_ABBREVIATION")?.trim().to_string();
+        if team.is_empty() || number_at(row, &columns, "ROSTERSTATUS")? < 1.0 {
+            continue;
+        }
+        players.push(RosterEntry {
+            player_id: number_at(row, &columns, "PERSON_ID")? as i64,
+            name: text_at(row, &columns, "DISPLAY_FIRST_LAST")?,
+            team_abbr: team,
+        });
+    }
+    Ok(players)
+}
+
+fn result_set(body: &str) -> AppResult<(HashMap<String, usize>, Vec<Value>)> {
     let payload: Value = serde_json::from_str(body)?;
     let set = payload
         .get("resultSets")
@@ -116,10 +154,15 @@ pub fn parse_player_game_logs(body: &str, season: &str, season_type: &str) -> Ap
     let rows = set
         .get("rowSet")
         .and_then(|value| value.as_array())
+        .cloned()
         .ok_or_else(|| AppError::message("the stats payload has no rows"))?;
+    Ok((columns, rows))
+}
 
+pub fn parse_player_game_logs(body: &str, season: &str, season_type: &str) -> AppResult<Vec<GameLog>> {
+    let (columns, rows) = result_set(body)?;
     let mut games = Vec::with_capacity(rows.len());
-    for row in rows {
+    for row in &rows {
         let Some(row) = row.as_array() else {
             continue;
         };
@@ -336,5 +379,17 @@ mod tests {
         );
         assert!(games.iter().all(|game| !game.game_id.starts_with("003")));
         assert!(games.iter().all(|game| game.game_date.len() == 10));
+    }
+
+    /// Hits stats.nba.com. Run with `cargo test -- --ignored live_roster`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_roster_has_every_team() {
+        let client = NbaClient::new().expect("chrome client");
+        let players = client.roster("2026-27").await.expect("commonallplayers");
+        let teams: std::collections::BTreeSet<_> = players.iter().map(|player| player.team_abbr.clone()).collect();
+        eprintln!("{} players on {} teams", players.len(), teams.len());
+        assert_eq!(teams.len(), 30, "{teams:?}");
+        assert!(players.len() > 400, "{}", players.len());
     }
 }

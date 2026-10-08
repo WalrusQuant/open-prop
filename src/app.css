@@ -182,6 +182,20 @@ button.link {
   font-size: 0.72rem;
 }
 
+.carry {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  align-items: baseline;
+  margin: 0 0 0.75rem;
+  font-size: 0.85rem;
+}
+
+.carry span {
+  color: var(--muted);
+  font-size: 0.8rem;
+}
+
 .banner {
   margin: 0.75rem 0 0;
   padding: 0.45rem 0.7rem;
@@ -401,6 +415,12 @@ button.chip.on {
   font-size: 0.68rem;
   letter-spacing: 0.14em;
   text-transform: uppercase;
+}
+
+.identity .team-note {
+  margin-left: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: none;
 }
 
 .identity .asking {

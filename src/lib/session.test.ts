@@ -13,7 +13,7 @@ vi.mock("./api", () => ({
   loadBootstrap: api.loadBootstrap,
 }));
 
-const { session, syncCurrent } = await import("./session.svelte");
+const { carrying, playersReady, session, syncCurrent } = await import("./session.svelte");
 
 function report(extra: Partial<SyncReport>): SyncReport {
   return {
@@ -24,6 +24,7 @@ function report(extra: Partial<SyncReport>): SyncReport {
     fetched: 40,
     syncedAt: "2026-10-07T18:00:00Z",
     warning: null,
+    rosterPlayers: null,
     ...extra,
   };
 }
@@ -56,10 +57,59 @@ describe("syncCurrent", () => {
     expect(session.notice).toBeNull();
   });
 
+  it("adds the roster count when the roster call answered", async () => {
+    api.syncSeason.mockResolvedValue(
+      report({ games: 0, fetched: 0, warning: "NBA returned 0 rows for 2026-27 Regular Season. Nothing was cached.", rosterPlayers: 614 }),
+    );
+    await syncCurrent();
+    expect(session.warning).toBe(
+      "NBA returned 0 rows for 2026-27 Regular Season. Nothing was cached. Rosters list 614 players.",
+    );
+  });
+
   it("shows the command error text", async () => {
     api.syncSeason.mockRejectedValue("A sync is already running.");
     await syncCurrent();
     expect(session.error).toBe("A sync is already running.");
     expect(session.syncing).toBe(false);
+  });
+});
+
+describe("opening night", () => {
+  const status = (season: string, seasonType: string, games: number) => ({
+    season,
+    seasonType,
+    games,
+    players: games ? 500 : 0,
+    firstGame: null,
+    lastGame: null,
+    syncedAt: null,
+  });
+
+  beforeEach(() => {
+    session.season = "2026-27";
+    session.seasonType = "Regular Season";
+    session.seed = true;
+    session.seasons = [status("2025-26", "Regular Season", 26000), status("2026-27", "Regular Season", 0)];
+  });
+
+  it("lists players before the first game when last season is cached and carry is on", () => {
+    expect(carrying()).toBe(true);
+    expect(playersReady()).toBe(true);
+  });
+
+  it("waits for a sync when carry is off or last season is missing", () => {
+    session.seed = false;
+    expect(playersReady()).toBe(false);
+    session.seed = true;
+    session.seasons = [status("2026-27", "Regular Season", 0)];
+    expect(carrying()).toBe(false);
+    expect(playersReady()).toBe(false);
+  });
+
+  it("playoffs carry their own regular season", () => {
+    session.seasonType = "Playoffs";
+    session.seasons = [status("2026-27", "Regular Season", 1200), status("2026-27", "Playoffs", 0)];
+    expect(playersReady()).toBe(true);
   });
 });

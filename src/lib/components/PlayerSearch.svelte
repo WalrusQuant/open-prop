@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from "svelte";
+  import { gamesLabel } from "$lib/carry";
   import type { PlayerOption } from "$lib/types";
 
   let {
@@ -103,7 +104,7 @@
               onclick={() => choose(player)}
             >
               <span>{player.name}</span>
-              <span class="meta">{player.team} · {player.games}</span>
+              <span class="meta">{player.team} · {gamesLabel(player)}</span>
             </button>
           </li>
         {/each}

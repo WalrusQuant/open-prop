@@ -15,19 +15,28 @@ fn main() {
         .unwrap_or_else(|| "Regular Season".to_string());
     let report = open_prop_lib::train_cached(&db, &season, &season_type)
         .unwrap_or_else(|error| panic!("{error}"));
+    if let Some(note) = &report.seed_note {
+        println!("{note}");
+    }
+    if let Some(source) = report.stats.iter().find_map(|stat| stat.seeded_from.as_deref()) {
+        println!("Carried {source}.");
+    }
     println!(
         "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",
         "stat", "holdout", "last 10", "cover", "train", "hold"
     );
+    // A fit that stands on the carried season alone has no holdout yet.
+    let number = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{value:.2}"));
+    let percent = |value: Option<f64>| value.map_or("-".to_string(), |value| format!("{:.1}%", value * 100.0));
     for stat in report.stats {
         match stat.error {
             Some(error) => println!("{:<28} {error}", stat.label),
             None => println!(
-                "{:<28} {:>8.2} {:>8.2} {:>7.1}% {:>8} {:>8}",
+                "{:<28} {:>8} {:>8} {:>8} {:>8} {:>8}",
                 stat.label,
-                stat.holdout_mae.unwrap_or(f64::NAN),
-                stat.baseline_mae.unwrap_or(f64::NAN),
-                stat.holdout_coverage.unwrap_or(f64::NAN) * 100.0,
+                number(stat.holdout_mae),
+                number(stat.baseline_mae),
+                percent(stat.holdout_coverage),
                 stat.train_rows,
                 stat.holdout_rows
             ),

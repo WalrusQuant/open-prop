@@ -16,6 +16,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "train-season"
 path = "src/bin/train_season.rs"
 
+[[bin]]
+name = "sync-season"
+path = "src/bin/sync_season.rs"
+
+[[bin]]
+name = "backtest-prior"
+path = "src/bin/backtest_prior.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 

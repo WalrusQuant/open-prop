@@ -14,6 +14,8 @@ use crate::stats::split_matchup;
 use super::bayes::{self, at_least, band, convolve, mean, minute_nodes, scale_mix, std_dev};
 use super::spec::{validate, ModelSpec};
 
+pub mod backtest;
+
 /// The spot the user names. There is no schedule, so nothing here is "tomorrow".
 #[derive(Debug, Clone)]
 pub struct Spot {
@@ -28,6 +30,40 @@ const MIN_TRAIN_ROWS: usize = 20;
 const MIN_PRIOR: usize = 5;
 const REST_CAP: f64 = 14.0;
 const FIT_PASSES: usize = 6;
+/// A seeded fit borrows last season's role rates, minutes, home, and rest until this season has this many rows.
+const SEED_POPULATION_ROWS: usize = 100;
+/// Last season's minutes per game count as this many games in the minutes anchor and the role.
+const CARRY_GAMES: f64 = 3.0;
+
+/// A player's last season for one stat, already discounted to at most `carry_minutes`
+/// pseudo-minutes. `stat` and `exposure` add to the gamma prior's shape and rate.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Carry {
+    stat: f64,
+    exposure: f64,
+    /// Minutes per game played last season.
+    minutes: f64,
+}
+
+/// The cached games a fit seeds from: last season's Regular Season, or this season's for Playoffs.
+pub struct Seed<'a> {
+    pub games: &'a [GameLog],
+    pub season: &'a str,
+    pub season_type: &'a str,
+}
+
+impl Seed<'_> {
+    fn label(&self) -> String {
+        format!("{} {}", self.season, self.season_type)
+    }
+}
+
+/// Last season's population for one part and every player's carry, built from the seed games.
+#[derive(Clone)]
+pub(crate) struct SeedPart {
+    population: Population,
+    carry: BTreeMap<i64, Carry>,
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct Population {
@@ -44,6 +80,9 @@ struct Population {
     home_log: f64,
     rest_log: f64,
     league_rate: f64,
+    /// Last season per player. Empty for an unseeded fit and for older files.
+    #[serde(default)]
+    carry: BTreeMap<i64, Carry>,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +101,10 @@ pub struct Fitted {
     pub shift_prior: f64,
     pub home_multiplier: Option<f64>,
     pub rest_per_day: Option<f64>,
+    /// "2025-26 Regular Season" when the fit carried that season over.
+    pub seeded_from: Option<String>,
+    pub carry_minutes: f64,
+    pub opponent_carry_minutes: f64,
 }
 
 pub struct PredictNumbers {
@@ -78,6 +121,8 @@ pub struct PredictNumbers {
     pub holdout_coverage: Option<f64>,
     pub train_rows: usize,
     pub holdout_rows: usize,
+    /// The seed season while his carry-over still outweighs this season's minutes.
+    pub prior_from: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,6 +139,9 @@ pub struct ModelScore {
     pub home_multiplier: Option<f64>,
     pub rest_per_day: Option<f64>,
     pub settings_stored: bool,
+    pub seeded_from: Option<String>,
+    pub carry_minutes: Option<f64>,
+    pub opponent_carry_minutes: Option<f64>,
 }
 
 #[derive(Clone)]
@@ -122,41 +170,30 @@ pub fn train_one(
     spec: &ModelSpec,
     season: &str,
     season_type: &str,
+    seed: Option<&Seed>,
 ) -> AppResult<Fitted> {
     validate(spec)?;
     let stat = Stat::parse(&spec.stat).ok_or_else(|| {
         AppError::message(format!("'{}' is not a stat this desk trains.", spec.stat))
     })?;
-    let part_stats = parts_of(stat);
-    let histories: Vec<Vec<Obs>> = part_stats
+    let seeds = match seed {
+        Some(seed) => seed_parts(seed.games, stat, spec)?,
+        None => vec![None; parts_of(stat).len()],
+    };
+    let seeded_from = match seed {
+        Some(seed) if seeds.iter().all(Option::is_some) => Some(seed.label()),
+        _ => None,
+    };
+    let histories: Vec<Vec<Obs>> = parts_of(stat)
         .iter()
         .map(|part| observations(games, *part))
         .collect();
-    let Some(sample) = histories.first() else {
-        return Err(AppError::message(format!(
-            "{} has no games to train on.",
-            spec.stat
-        )));
-    };
-    let cutoff = holdout_start(sample);
-    let teams = known_teams(sample);
-    let mut parts = Vec::with_capacity(histories.len());
-    for (part, rows) in part_stats.iter().zip(histories.iter()) {
-        let train: Vec<Obs> = match &cutoff {
-            Some(date) => rows.iter().filter(|row| row.date.as_str() < date.as_str()).cloned().collect(),
-            None => rows.clone(),
-        };
-        if train.is_empty() {
-            return Err(AppError::message(format!(
-                "{} has no training games before the holdout.",
-                part.id()
-            )));
-        }
-        parts.push(fit_population(&train, spec, part.id(), &teams)?);
-    }
+    let cutoff = histories.first().and_then(|rows| holdout_start(rows));
+    let parts = fit_parts(&histories, stat, spec, &seeds, cutoff.as_deref())?;
     let (train_rows, holdout_rows, holdout_mae, baseline_mae, holdout_coverage) =
         score(&parts, &histories, cutoff.as_deref());
-    if train_rows < MIN_TRAIN_ROWS {
+    // A seeded fit can price players before the holdout has enough rows to score.
+    if train_rows < MIN_TRAIN_ROWS && seeded_from.is_none() {
         return Err(AppError::message(format!(
             "{} has {train_rows} training rows after holding out the last 20% of dates. A model needs at least {MIN_TRAIN_ROWS}.",
             spec.stat
@@ -185,7 +222,119 @@ pub fn train_one(
         shift_prior: spec.shift_prior,
         home_multiplier,
         rest_per_day,
+        seeded_from,
+        carry_minutes: spec.carry_minutes,
+        opponent_carry_minutes: spec.opponent_carry_minutes,
     })
+}
+
+/// Last season's population and carry for each part of `stat`. A part with no seed rows is None.
+pub(crate) fn seed_parts(games: &[GameLog], stat: Stat, spec: &ModelSpec) -> AppResult<Vec<Option<SeedPart>>> {
+    parts_of(stat)
+        .iter()
+        .map(|part| {
+            let rows = observations(games, *part);
+            if rows.is_empty() {
+                return Ok(None);
+            }
+            let population = fit_population(&rows, spec, part.id(), &known_teams(&rows), &BTreeMap::new(), None)?;
+            let carry = build_carry(&population, &rows, spec.carry_minutes);
+            Ok(Some(SeedPart { population, carry }))
+        })
+        .collect()
+}
+
+/// Fits each part on rows before `cutoff`. A seeded part with fewer than
+/// `SEED_POPULATION_ROWS` rows borrows last season's population.
+fn fit_parts(
+    histories: &[Vec<Obs>],
+    stat: Stat,
+    spec: &ModelSpec,
+    seeds: &[Option<SeedPart>],
+    cutoff: Option<&str>,
+) -> AppResult<Vec<Population>> {
+    let mut teams = histories.first().map(|rows| known_teams(rows)).unwrap_or_default();
+    for seed in seeds.iter().flatten() {
+        teams.extend(seed.population.teams.iter().cloned());
+    }
+    let none = BTreeMap::new();
+    let mut parts = Vec::with_capacity(histories.len());
+    for ((part, rows), seed) in parts_of(stat).iter().zip(histories.iter()).zip(seeds.iter()) {
+        let train: Vec<Obs> = match cutoff {
+            Some(date) => rows.iter().filter(|row| row.date.as_str() < date).cloned().collect(),
+            None => rows.clone(),
+        };
+        let population = match seed {
+            Some(seed) if train.len() < SEED_POPULATION_ROWS => borrowed_population(seed, spec, &teams),
+            Some(seed) => fit_population(
+                &train,
+                spec,
+                part.id(),
+                &teams,
+                &seed.carry,
+                Some(&seed.population.opponents),
+            )?,
+            None if train.is_empty() => {
+                return Err(AppError::message(format!(
+                    "{} has no training games before the holdout.",
+                    part.id()
+                )));
+            }
+            None => fit_population(&train, spec, part.id(), &teams, &none, None)?,
+        };
+        parts.push(population);
+    }
+    Ok(parts)
+}
+
+/// Last season's population with this spec's priors, every opponent multiplier shrunk
+/// toward 1 by `opponent_carry_minutes`, and the player carry attached.
+fn borrowed_population(seed: &SeedPart, spec: &ModelSpec, teams: &BTreeSet<String>) -> Population {
+    let mut population = seed.population.clone();
+    let k = spec.opponent_minutes;
+    let k_carry = spec.opponent_carry_minutes;
+    population.opponents = population
+        .opponents
+        .iter()
+        .map(|(team, factor)| (team.clone(), (k + k_carry * factor) / (k + k_carry)))
+        .collect();
+    population.prior_minutes = spec.prior_minutes;
+    population.opponent_minutes = spec.opponent_minutes;
+    population.shift_prior = spec.shift_prior;
+    population.teams = teams.clone();
+    population.carry = seed.carry.clone();
+    population
+}
+
+/// Each player's seed totals, raised to the power `min(1, carry_minutes / M)` so at most
+/// `carry_minutes` adjusted minutes come over. Zero turns the player seed off.
+fn build_carry(population: &Population, rows: &[Obs], carry_minutes: f64) -> BTreeMap<i64, Carry> {
+    let mut totals: HashMap<i64, (f64, f64, f64, f64)> = HashMap::new();
+    for row in rows {
+        let entry = totals.entry(row.player_id).or_insert((0.0, 0.0, 0.0, 0.0));
+        entry.0 += row.stat;
+        entry.1 += adjusted_exposure(population, row);
+        entry.2 += row.minutes;
+        entry.3 += 1.0;
+    }
+    if !(carry_minutes > 0.0) {
+        return BTreeMap::new();
+    }
+    totals
+        .into_iter()
+        .filter(|(_, (_, exposure, _, games))| *exposure > 0.0 && *games > 0.0)
+        .map(|(player, (stat, exposure, minutes, games))| {
+            let power = (carry_minutes / exposure).min(1.0);
+            (
+                player,
+                Carry {
+                    stat: stat * power,
+                    exposure: exposure * power,
+                    minutes: minutes / games,
+                },
+            )
+        })
+        .collect()
 }
 
 pub fn predict_spot(
@@ -194,6 +343,48 @@ pub fn predict_spot(
     spot: &Spot,
     window: &str,
     line: f64,
+) -> AppResult<PredictNumbers> {
+    // A player with last season carried over can be priced before his first game.
+    let carried = fitted
+        .parts
+        .first()
+        .is_some_and(|part| part.carry.contains_key(&spot.player_id));
+    if !carried {
+        let stat = Stat::parse(&fitted.stat).ok_or_else(|| {
+            AppError::message(format!("'{}' is not a stat this desk tracks.", fitted.stat))
+        })?;
+        let played = parts_of(stat)
+            .first()
+            .map(|part| {
+                observations(games, *part)
+                    .iter()
+                    .filter(|row| row.player_id == spot.player_id)
+                    .count()
+            })
+            .unwrap_or(0);
+        if played < MIN_PRIOR {
+            let games_word = if played == 1 { "game" } else { "games" };
+            return Err(AppError::message(match fitted.seeded_from.as_deref() {
+                Some(source) => format!(
+                    "He has no {source} minutes to carry, so a prediction waits for {MIN_PRIOR} games this season. He has {played} {games_word}."
+                ),
+                None => format!(
+                    "This player has {played} cached {games_word}. A prediction starts after {MIN_PRIOR}."
+                ),
+            }));
+        }
+    }
+    predict_with(fitted, games, spot, window, line, 0)
+}
+
+/// `predict_spot` with the game minimum as an argument. The backtest prices game one with 0.
+pub(crate) fn predict_with(
+    fitted: &Fitted,
+    games: &[GameLog],
+    spot: &Spot,
+    window: &str,
+    line: f64,
+    min_games: usize,
 ) -> AppResult<PredictNumbers> {
     if !line.is_finite() || line < 0.0 {
         return Err(AppError::message(
@@ -221,9 +412,9 @@ pub fn predict_spot(
             .into_iter()
             .filter(|row| row.player_id == spot.player_id)
             .collect();
-        if mine.len() < MIN_PRIOR {
+        if mine.len() < min_games {
             return Err(AppError::message(format!(
-                "This player has {} cached games. A prediction starts after {MIN_PRIOR}.",
+                "This player has {} cached games. A prediction starts after {min_games}.",
                 mine.len()
             )));
         }
@@ -253,6 +444,7 @@ pub fn predict_spot(
     let forecast = combine(
         &fitted.parts,
         &histories,
+        spot.player_id,
         window_len(window),
         spot.minutes,
         &opponent,
@@ -260,6 +452,15 @@ pub fn predict_spot(
         rest,
         true,
     );
+    // The note stays while last season's pseudo-minutes outweigh this season's adjusted minutes.
+    let prior_from = match (fitted.seeded_from.as_ref(), fitted.parts.first(), histories.first()) {
+        (Some(source), Some(part), Some(history)) => part
+            .carry
+            .get(&spot.player_id)
+            .filter(|carry| carry.exposure > adjusted_totals(part, history).1)
+            .map(|_| source.clone()),
+        _ => None,
+    };
     Ok(PredictNumbers {
         clear_probability: at_least(&forecast.pmf, line),
         mean: forecast.mean,
@@ -274,6 +475,7 @@ pub fn predict_spot(
         holdout_coverage: fitted.holdout_coverage,
         train_rows: fitted.train_rows,
         holdout_rows: fitted.holdout_rows,
+        prior_from,
     })
 }
 
@@ -301,6 +503,9 @@ pub fn save_model(fitted: &Fitted, fitted_at: &str, directory: &Path) -> AppResu
         home_multiplier: fitted.home_multiplier,
         rest_per_day: fitted.rest_per_day,
         fitted_at: Some(fitted_at.to_string()),
+        seeded_from: fitted.seeded_from.clone(),
+        carry_minutes: fitted.carry_minutes,
+        opponent_carry_minutes: fitted.opponent_carry_minutes,
     };
     write_atomic(&path, |writer| {
         serde_json::to_writer(writer, &saved)?;
@@ -358,6 +563,9 @@ pub fn load_model(directory: &Path, season: &str, season_type: &str, stat: &str)
         shift_prior: saved.shift_prior,
         home_multiplier: saved.home_multiplier,
         rest_per_day: saved.rest_per_day,
+        seeded_from: saved.seeded_from,
+        carry_minutes: saved.carry_minutes,
+        opponent_carry_minutes: saved.opponent_carry_minutes,
     })
 }
 
@@ -381,6 +589,9 @@ pub fn load_score(
         home_multiplier: saved.home_multiplier,
         rest_per_day: saved.rest_per_day,
         settings_stored: true,
+        seeded_from: saved.seeded_from,
+        carry_minutes: Some(saved.carry_minutes),
+        opponent_carry_minutes: Some(saved.opponent_carry_minutes),
     })
 }
 
@@ -469,6 +680,8 @@ fn fit_population(
     spec: &ModelSpec,
     stat_id: &str,
     teams: &BTreeSet<String>,
+    carry: &BTreeMap<i64, Carry>,
+    opponent_prior: Option<&BTreeMap<String, f64>>,
 ) -> AppResult<Population> {
     if train.is_empty() {
         return Err(AppError::message(format!(
@@ -482,7 +695,7 @@ fn fit_population(
     } else {
         0.0
     };
-    let roles = player_roles(train, &spec.role_minutes);
+    let roles = player_roles(train, &spec.role_minutes, carry);
     let role_count = spec.role_minutes.len() + 1;
     let mut role_stat = vec![0.0; role_count];
     let mut role_minutes = vec![0.0; role_count];
@@ -538,6 +751,7 @@ fn fit_population(
             home_log,
             rest_log,
             league_rate,
+            carry,
         );
         opponents = opponent_factors(
             train,
@@ -546,6 +760,7 @@ fn fit_population(
             rest_log,
             spec.opponent_minutes,
             league_rate,
+            opponent_prior.map(|prior| (prior, spec.opponent_carry_minutes)),
         );
         fit_context(
             train,
@@ -571,23 +786,39 @@ fn fit_population(
         home_log,
         rest_log,
         league_rate,
+        carry: carry.clone(),
     })
 }
 
-fn player_roles(rows: &[Obs], cuts: &[f64]) -> HashMap<i64, usize> {
-    let mut totals: HashMap<i64, (f64, f64)> = HashMap::new();
+fn player_roles(rows: &[Obs], cuts: &[f64], carry: &BTreeMap<i64, Carry>) -> HashMap<i64, usize> {
+    let mut totals: HashMap<i64, (f64, usize)> = HashMap::new();
     for row in rows {
-        let entry = totals.entry(row.player_id).or_insert((0.0, 0.0));
+        let entry = totals.entry(row.player_id).or_insert((0.0, 0));
         entry.0 += row.minutes;
-        entry.1 += 1.0;
+        entry.1 += 1;
     }
     totals
         .into_iter()
         .map(|(player, (minutes, games))| {
-            let average = if games > 0.0 { minutes / games } else { 0.0 };
+            let average = role_minutes(minutes, games, carry.get(&player));
             (player, role_index(average, cuts))
         })
         .collect()
+}
+
+/// Average minutes for the role cut. Last season's minutes per game count as `CARRY_GAMES` games.
+fn role_minutes(minutes: f64, games: usize, carry: Option<&Carry>) -> f64 {
+    match carry {
+        Some(carry) => (minutes + CARRY_GAMES * carry.minutes) / (games as f64 + CARRY_GAMES),
+        None if games == 0 => 0.0,
+        None => minutes / games as f64,
+    }
+}
+
+/// The gamma prior on a player's rate: the role prior, plus last season's discounted totals.
+fn rate_prior(part: &Population, prior_rate: f64, carry: Option<&Carry>) -> (f64, f64) {
+    let (stat, exposure) = carry.map_or((0.0, 0.0), |carry| (carry.stat, carry.exposure));
+    (part.prior_minutes * prior_rate.max(0.0) + stat, part.prior_minutes + exposure)
 }
 
 fn role_index(minutes: f64, cuts: &[f64]) -> usize {
@@ -618,14 +849,18 @@ fn player_rates(
     home_log: f64,
     rest_log: f64,
     league_rate: f64,
+    carry: &BTreeMap<i64, Carry>,
 ) -> HashMap<i64, f64> {
     let mut shape: HashMap<i64, f64> = HashMap::new();
     let mut rate: HashMap<i64, f64> = HashMap::new();
     for row in rows {
         let role = roles.get(&row.player_id).copied().unwrap_or(0);
         let prior_rate = role_rates.get(role).copied().unwrap_or(league_rate).max(0.0);
-        shape.entry(row.player_id).or_insert(prior_minutes * prior_rate);
-        rate.entry(row.player_id).or_insert(prior_minutes);
+        let (carry_stat, carry_exposure) = carry
+            .get(&row.player_id)
+            .map_or((0.0, 0.0), |carry| (carry.stat, carry.exposure));
+        shape.entry(row.player_id).or_insert(prior_minutes * prior_rate + carry_stat);
+        rate.entry(row.player_id).or_insert(prior_minutes + carry_exposure);
         let opp = opponents.get(&row.opponent).copied().unwrap_or(1.0);
         let exposure = row.minutes * opp * context_multiplier(row.home, row.rest_days, home_log, rest_log);
         *shape.get_mut(&row.player_id).unwrap() += row.stat;
@@ -647,6 +882,7 @@ fn opponent_factors(
     rest_log: f64,
     opponent_minutes: f64,
     league_rate: f64,
+    prior: Option<(&BTreeMap<String, f64>, f64)>,
 ) -> HashMap<String, f64> {
     let mut observed: HashMap<String, f64> = HashMap::new();
     let mut expected: HashMap<String, f64> = HashMap::new();
@@ -657,11 +893,20 @@ fn opponent_factors(
         *expected.entry(row.opponent.clone()).or_insert(0.0) += base;
     }
     let strength = (opponent_minutes * league_rate).max(1e-6);
+    // Last season's multiplier is a second pseudo-observation, worth `opponent_carry_minutes`.
+    let (carried, carry_strength) = match prior {
+        Some((factors, minutes)) => (Some(factors), (minutes * league_rate).max(0.0)),
+        None => (None, 0.0),
+    };
+    for team in carried.into_iter().flat_map(|factors| factors.keys()) {
+        observed.entry(team.clone()).or_insert(0.0);
+    }
     observed
         .into_iter()
         .map(|(team, seen)| {
             let expect = expected.get(&team).copied().unwrap_or(0.0);
-            let factor = (seen + strength) / (expect + strength);
+            let before = carried.and_then(|factors| factors.get(&team)).copied().unwrap_or(1.0);
+            let factor = (seen + strength + carry_strength * before) / (expect + strength + carry_strength);
             (team, factor.clamp(0.67, 1.5))
         })
         .collect()
@@ -752,6 +997,7 @@ fn score(
             let forecast = combine(
                 parts,
                 &past,
+                row.player_id,
                 Some(10),
                 None,
                 &row.opponent,
@@ -794,6 +1040,7 @@ fn last_totals(history: &[Obs], count: usize) -> f64 {
 fn combine(
     parts: &[Population],
     histories: &[Vec<Obs>],
+    player_id: i64,
     window: Option<usize>,
     minutes: Option<f64>,
     opponent: &str,
@@ -801,7 +1048,12 @@ fn combine(
     rest_days: f64,
     report_shift: bool,
 ) -> Forecast {
-    let minute_plan = minutes_plan(parts.first(), histories.first().map(Vec::as_slice).unwrap_or(&[]), minutes);
+    let minute_plan = minutes_plan(
+        parts.first(),
+        histories.first().map(Vec::as_slice).unwrap_or(&[]),
+        minutes,
+        player_id,
+    );
     let mut weighted = Vec::new();
     let mut weights = Vec::new();
     let mut minute_total = 0.0;
@@ -818,6 +1070,7 @@ fn combine(
                 opponent,
                 home,
                 rest_days,
+                part.carry.get(&player_id),
             );
             if shift.is_none() && report_shift && parts.len() == 1 {
                 shift = part_shift;
@@ -851,25 +1104,36 @@ fn combine(
     }
 }
 
-fn minutes_plan(part: Option<&Population>, history: &[Obs], minutes: Option<f64>) -> Vec<(f64, f64)> {
+fn minutes_plan(
+    part: Option<&Population>,
+    history: &[Obs],
+    minutes: Option<f64>,
+    player_id: i64,
+) -> Vec<(f64, f64)> {
     if let Some(minutes) = minutes {
         return vec![(minutes.clamp(0.0, 48.0), 1.0)];
     }
     let Some(part) = part else {
         return vec![(24.0, 1.0)];
     };
-    let role = role_index(average_minutes(history), &part.role_minutes);
-    let role_mean = part
-        .role_minute_means
-        .get(role)
-        .copied()
-        .unwrap_or(24.0);
+    let carry = part.carry.get(&player_id);
+    let role = role_index(history_role_minutes(history, carry), &part.role_minutes);
+    // A seeded player's anchor starts at his own minutes last season and fades to his role's
+    // as this season's games come in, the same weight the role blend gives them.
+    let role_mean = part.role_minute_means.get(role).copied().unwrap_or(24.0);
+    let anchor = match carry {
+        Some(carry) => {
+            let games = history.len() as f64;
+            (CARRY_GAMES * carry.minutes + games * role_mean) / (CARRY_GAMES + games)
+        }
+        None => role_mean,
+    };
     let recent = last_minutes(history, 10);
     let mean = if recent.is_empty() {
-        role_mean
+        anchor
     } else {
         let sum: f64 = recent.iter().sum();
-        (sum + 3.0 * role_mean) / (recent.len() as f64 + 3.0)
+        (sum + CARRY_GAMES * anchor) / (recent.len() as f64 + CARRY_GAMES)
     };
     let log_sd = part.role_log_sd.get(role).copied().unwrap_or(0.2);
     minute_nodes(mean, log_sd)
@@ -884,11 +1148,8 @@ fn last_minutes(history: &[Obs], count: usize) -> Vec<f64> {
         .collect()
 }
 
-fn average_minutes(history: &[Obs]) -> f64 {
-    if history.is_empty() {
-        return 0.0;
-    }
-    history.iter().map(|row| row.minutes).sum::<f64>() / history.len() as f64
+fn history_role_minutes(history: &[Obs], carry: Option<&Carry>) -> f64 {
+    role_minutes(history.iter().map(|row| row.minutes).sum(), history.len(), carry)
 }
 
 struct RatePosterior {
@@ -904,10 +1165,12 @@ fn pmf_at(
     opponent: &str,
     home: bool,
     rest_days: f64,
+    carry: Option<&Carry>,
 ) -> (Vec<f64>, Option<f64>) {
-    let role = role_index(average_minutes(history), &part.role_minutes);
+    let role = role_index(history_role_minutes(history, carry), &part.role_minutes);
     let prior_rate = part.role_rates.get(role).copied().unwrap_or(part.league_rate).max(0.0);
-    let season = posterior(part, history, prior_rate);
+    let (prior_shape, prior_scale) = rate_prior(part, prior_rate, carry);
+    let season = posterior(part, history, prior_shape, prior_scale);
     let exposure = predictive_exposure(part, minutes, opponent, home, rest_days);
     let season_pmf = bayes::negative_binomial(season.shape, season.rate, exposure);
     let Some(window) = window else {
@@ -919,13 +1182,13 @@ fn pmf_at(
     let split = history.len() - window;
     let early = &history[..split];
     let recent = &history[split..];
-    let recent_posterior = posterior(part, recent, prior_rate);
+    let recent_posterior = posterior(part, recent, prior_shape, prior_scale);
     let recent_pmf = bayes::negative_binomial(recent_posterior.shape, recent_posterior.rate, exposure);
     let (early_y, early_m) = adjusted_totals(part, early);
     let (window_y, window_m) = adjusted_totals(part, recent);
     let shift = bayes::shift_probability(
-        part.prior_minutes * prior_rate.max(1e-6),
-        part.prior_minutes,
+        prior_shape.max(part.prior_minutes * 1e-6),
+        prior_scale,
         early_y,
         early_m,
         window_y,
@@ -933,7 +1196,7 @@ fn pmf_at(
         part.shift_prior,
     );
     // A zero prior rate makes the gamma shape zero. Keep a tiny shape so the marginal stays defined.
-    let shift = if (part.prior_minutes * prior_rate) <= 1e-8 {
+    let shift = if prior_shape <= 1e-8 {
         0.0
     } else {
         shift
@@ -941,9 +1204,9 @@ fn pmf_at(
     (bayes::mix(&season_pmf, &recent_pmf, shift), Some(shift))
 }
 
-fn posterior(part: &Population, history: &[Obs], prior_rate: f64) -> RatePosterior {
-    let mut shape = part.prior_minutes * prior_rate.max(0.0);
-    let mut rate = part.prior_minutes;
+fn posterior(part: &Population, history: &[Obs], prior_shape: f64, prior_scale: f64) -> RatePosterior {
+    let mut shape = prior_shape;
+    let mut rate = prior_scale;
     if shape <= 1e-8 {
         shape = 1e-3;
     }
@@ -1003,6 +1266,12 @@ struct SavedModel {
     rest_per_day: Option<f64>,
     #[serde(default)]
     fitted_at: Option<String>,
+    #[serde(default)]
+    seeded_from: Option<String>,
+    #[serde(default)]
+    carry_minutes: f64,
+    #[serde(default)]
+    opponent_carry_minutes: f64,
 }
 
 /// `Regular Season` becomes `regular-season`. Anything outside letters and digits becomes a dash.
@@ -1164,13 +1433,262 @@ mod tests {
             role_minutes: vec![15.0, 28.0],
             home_sd,
             rest_sd: 0.02,
+            carry_minutes: 400.0,
+            opponent_carry_minutes: 1500.0,
         }
+    }
+
+    fn player_game(player: i64, day: i64, opponent: &str, minutes: f64, points: i32) -> GameLog {
+        let mut row = game(day, day % 2 == 0, points);
+        row.player_id = player;
+        row.player_name = format!("P{player}");
+        row.game_id = format!("g{player}-{day}");
+        row.minutes = minutes;
+        row.matchup = if day % 2 == 0 {
+            format!("DAL vs. {opponent}")
+        } else {
+            format!("DAL @ {opponent}")
+        };
+        row
+    }
+
+    /// A season before 2025-26: player 1 scores 30 a night, players 2-7 score 10.
+    fn last_season() -> Vec<GameLog> {
+        let mut games = Vec::new();
+        for day in 0..60 {
+            let opponent = if day % 2 == 0 { "BOS" } else { "NYK" };
+            games.push(player_game(1, day * 2 - 400, opponent, 32.0, 30));
+            for player in 2..8 {
+                games.push(player_game(player, day * 2 - 400, opponent, 32.0, 10));
+            }
+        }
+        games
+    }
+
+    fn seed(games: &[GameLog]) -> Seed<'_> {
+        Seed {
+            games,
+            season: "2024-25",
+            season_type: "Regular Season",
+        }
+    }
+
+    #[test]
+    fn carry_is_capped_at_carry_minutes_and_zero_turns_it_off() {
+        let mut before = last_season();
+        for day in 0..3 {
+            before.push(player_game(9, day * 2 - 400, "BOS", 20.0, 6));
+        }
+        let parts = seed_parts(&before, Stat::Points, &spec(0.08)).unwrap();
+        let part = parts[0].as_ref().unwrap();
+        let star = &part.carry[&1];
+        // 60 games of 32 minutes come over as 400 pseudo-minutes at his own rate.
+        assert!((star.exposure - 400.0).abs() < 1e-6, "{}", star.exposure);
+        assert!((star.stat / star.exposure - 30.0 / 32.0).abs() < 0.05, "{star:?}");
+        assert_eq!(star.minutes, 32.0);
+        // Under the cap the whole season comes over.
+        let bench = &part.carry[&9];
+        assert!(bench.exposure < 70.0 && bench.exposure > 50.0, "{bench:?}");
+        assert_eq!(bench.stat, 18.0);
+        let mut off = spec(0.08);
+        off.carry_minutes = 0.0;
+        let parts = seed_parts(&before, Stat::Points, &off).unwrap();
+        assert!(parts[0].as_ref().unwrap().carry.is_empty());
+    }
+
+    #[test]
+    fn a_seeded_player_starts_from_last_season_and_a_rookie_from_his_role() {
+        let before = last_season();
+        // Two games in: player 1 was traded and scores 12, rookie 9 scores 12, the rest 10.
+        let mut games = Vec::new();
+        for day in 0..2 {
+            games.push(player_game(1, day * 2, "LAL", 32.0, 12));
+            games.push(player_game(9, day * 2, "LAL", 32.0, 12));
+            for player in 2..8 {
+                games.push(player_game(player, day * 2, "LAL", 32.0, 10));
+            }
+        }
+        let error = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap_err();
+        assert!(error.to_string().contains("training rows"), "{error}");
+        let fitted =
+            train_one(&games, &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        assert_eq!(fitted.seeded_from.as_deref(), Some("2024-25 Regular Season"));
+        let spot = |player| Spot {
+            player_id: player,
+            opponent: Some("LAL".to_string()),
+            home: true,
+            rest_days: 2.0,
+            minutes: Some(32.0),
+        };
+        let star = predict_spot(&fitted, &games, &spot(1), "last_10", 20.5).unwrap();
+        assert!(star.mean > 20.0, "the carry should hold him near 30, mean {:.2}", star.mean);
+        assert_eq!(star.prior_from.as_deref(), Some("2024-25 Regular Season"));
+        // The rookie keeps the five-game gate and, under it, the role prior.
+        let error = predict_spot(&fitted, &games, &spot(9), "last_10", 20.5).err().unwrap();
+        assert!(error.to_string().contains("waits for 5 games"), "{error}");
+        let rookie = predict_with(&fitted, &games, &spot(9), "last_10", 20.5, 0).unwrap();
+        assert!(rookie.prior_from.is_none());
+        assert!(rookie.mean > 10.0 && rookie.mean < 18.0, "rookie mean {:.2}", rookie.mean);
+        // The carry fades: once his own minutes outweigh it, the note goes away.
+        let mut longer = games.clone();
+        for day in 2..20 {
+            longer.push(player_game(1, day * 2, "LAL", 32.0, 12));
+        }
+        let later = predict_spot(&fitted, &longer, &spot(1), "season", 20.5).unwrap();
+        assert!(later.prior_from.is_none());
+        assert!(later.mean < star.mean);
+    }
+
+    #[test]
+    fn a_seeded_fit_with_no_games_this_season_borrows_last_season() {
+        let before = last_season();
+        let error = train_one(&[], &spec(0.08), "2025-26", "Regular Season", None).unwrap_err();
+        assert!(error.to_string().contains("no training games"), "{error}");
+        let fitted = train_one(&[], &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        assert_eq!(fitted.seeded_from.as_deref(), Some("2024-25 Regular Season"));
+        assert_eq!((fitted.train_rows, fitted.holdout_rows), (0, 0));
+        assert!(fitted.holdout_mae.is_none());
+        let source = seed_parts(&before, Stat::Points, &spec(0.08)).unwrap();
+        let source = source[0].as_ref().unwrap();
+        assert_eq!(fitted.parts[0].role_rates, source.population.role_rates);
+        assert_eq!(fitted.parts[0].role_minute_means, source.population.role_minute_means);
+        assert!(fitted.parts[0].teams.contains("BOS"));
+        // Every part of a combo is borrowed the same way.
+        let mut combo = spec(0.08);
+        combo.stat = "points_assists_rebounds".to_string();
+        let fitted = train_one(&[], &combo, "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        assert_eq!(fitted.parts.len(), 3);
+    }
+
+    #[test]
+    fn a_carried_player_is_priced_before_his_first_game_and_a_rookie_is_told_why_not() {
+        let before = last_season();
+        let fitted = train_one(&[], &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        let spot = |player| Spot {
+            player_id: player,
+            opponent: Some("BOS".to_string()),
+            home: true,
+            rest_days: 2.0,
+            minutes: None,
+        };
+        let star = predict_spot(&fitted, &[], &spot(1), "last_10", 25.5).unwrap();
+        assert!(star.mean > 24.0 && star.mean < 34.0, "carry alone, mean {:.2}", star.mean);
+        assert!((star.minutes - 32.0).abs() < 2.0, "minutes start at last season's 32, {:.1}", star.minutes);
+        assert_eq!(star.prior_from.as_deref(), Some("2024-25 Regular Season"));
+        assert!(star.clear_probability > 0.5);
+        assert!((star.pmf.iter().sum::<f64>() - 1.0).abs() < 0.02);
+        let bench = predict_spot(&fitted, &[], &spot(2), "last_10", 25.5).unwrap();
+        assert!(bench.mean < 14.0, "a 10-point player stays near 10, mean {:.2}", bench.mean);
+        let error = predict_spot(&fitted, &[], &spot(9), "last_10", 25.5).err().unwrap();
+        let message = error.to_string();
+        assert!(message.contains("no 2024-25 Regular Season minutes to carry"), "{message}");
+        assert!(message.contains("He has 0 games"), "{message}");
+    }
+
+    #[test]
+    fn a_playoffs_fit_seeds_from_the_same_regular_season() {
+        let mut regular = last_season();
+        for row in &mut regular {
+            row.game_date = on_date(-2);
+        }
+        let playoffs: Vec<GameLog> = (0..2).map(|day| player_game(1, day * 2, "BOS", 32.0, 26)).collect();
+        let source = Seed {
+            games: &regular,
+            season: "2025-26",
+            season_type: "Regular Season",
+        };
+        let fitted = train_one(&playoffs, &spec(0.08), "2025-26", "Playoffs", Some(&source)).unwrap();
+        assert_eq!(fitted.seeded_from.as_deref(), Some("2025-26 Regular Season"));
+        assert_eq!(fitted.season_type, "Playoffs");
+        assert!(fitted.parts[0].carry.contains_key(&1));
+        // Too few playoff rows to fit a population, so the regular season's is borrowed.
+        assert!(fitted.parts[0].teams.contains("NYK"));
+    }
+
+    #[test]
+    fn a_seeded_players_minutes_start_from_last_season_and_fade_to_his_role() {
+        let part = Population {
+            stat: "pts".to_string(),
+            prior_minutes: 80.0,
+            opponent_minutes: 500.0,
+            shift_prior: 0.1,
+            role_minutes: vec![15.0, 28.0],
+            role_rates: vec![0.3, 0.4, 0.5],
+            role_minute_means: vec![10.0, 22.0, 32.0],
+            role_log_sd: vec![0.3, 0.3, 0.3],
+            opponents: BTreeMap::new(),
+            teams: BTreeSet::new(),
+            home_log: 0.0,
+            rest_log: 0.0,
+            league_rate: 0.4,
+            carry: [(1, Carry { stat: 300.0, exposure: 600.0, minutes: 34.0 })].into_iter().collect(),
+        };
+        let center = |history: &[Obs], player: i64| {
+            let plan = minutes_plan(Some(&part), history, None, player);
+            plan.iter().map(|(minutes, weight)| minutes * weight).sum::<f64>()
+                / plan.iter().map(|(_, weight)| weight).sum::<f64>()
+        };
+        // No games yet: the starter opens near his 34 minutes, the rookie at the bench role.
+        assert!(center(&[], 1) > 28.0, "{}", center(&[], 1));
+        assert!(center(&[], 2) < 14.0, "{}", center(&[], 2));
+        // Thirty games of 20 minutes: the anchor has faded to the middle role, and he plays 20.
+        let history: Vec<Obs> = (0..30)
+            .map(|day| Obs {
+                player_id: 1,
+                date: on_date(day),
+                opponent: "BOS".to_string(),
+                home: true,
+                rest_days: 1.0,
+                minutes: 20.0,
+                stat: 8.0,
+            })
+            .collect();
+        let later = center(&history, 1);
+        assert!((18.0..23.0).contains(&later), "{later}");
+    }
+
+    #[test]
+    fn opponent_carry_shrinks_toward_one() {
+        let league_rate = 0.5;
+        let prior: BTreeMap<String, f64> = [("BOS".to_string(), 1.3)].into_iter().collect();
+        let lambdas = HashMap::new();
+        let factor = |carry_minutes: f64| {
+            opponent_factors(&[], &lambdas, 0.0, 0.0, 500.0, league_rate, Some((&prior, carry_minutes)))["BOS"]
+        };
+        assert!((factor(0.0) - 1.0).abs() < 1e-12);
+        assert!((factor(1500.0) - (500.0 + 1500.0 * 1.3) / 2000.0).abs() < 1e-12);
+        assert!(factor(20000.0) > 1.28);
+        // A team with no multiplier last season starts at 1.
+        let none = opponent_factors(&[], &lambdas, 0.0, 0.0, 500.0, league_rate, Some((&prior, 1500.0)));
+        assert!(!none.contains_key("NYK"));
+        let part = Population {
+            stat: "pts".to_string(),
+            prior_minutes: 80.0,
+            opponent_minutes: 500.0,
+            shift_prior: 0.1,
+            role_minutes: vec![15.0, 28.0],
+            role_rates: vec![0.3, 0.4, 0.5],
+            role_minute_means: vec![10.0, 22.0, 32.0],
+            role_log_sd: vec![0.3, 0.3, 0.3],
+            opponents: [("BOS".to_string(), 1.3)].into_iter().collect(),
+            teams: BTreeSet::new(),
+            home_log: 0.0,
+            rest_log: 0.0,
+            league_rate,
+            carry: BTreeMap::new(),
+        };
+        let seed = SeedPart { population: part, carry: BTreeMap::new() };
+        let mut settings = spec(0.08);
+        settings.opponent_minutes = 500.0;
+        let borrowed = borrowed_population(&seed, &settings, &BTreeSet::new());
+        assert!((borrowed.opponents["BOS"] - factor(1500.0)).abs() < 1e-12);
+        assert_eq!(borrowed.prior_minutes, 80.0);
     }
 
     #[test]
     fn home_games_score_higher_than_away_games() {
         let games: Vec<GameLog> = (0..40).map(|day| game(day, day % 2 == 0, if day % 2 == 0 { 25 } else { 15 })).collect();
-        let fitted = train_one(&games, &spec(0.4), "2025-26", "Regular Season").unwrap();
+        let fitted = train_one(&games, &spec(0.4), "2025-26", "Regular Season", None).unwrap();
         let spot = |home| Spot {
             player_id: 1,
             opponent: Some("BOS".to_string()),
@@ -1205,7 +1723,7 @@ mod tests {
                 games.push(row);
             }
         }
-        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap();
         let mae = fitted.holdout_mae.expect("holdout");
         assert!(
             mae > 15.0,
@@ -1216,7 +1734,7 @@ mod tests {
     #[test]
     fn a_saved_model_predicts_the_same_mean() {
         let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
-        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap();
         let spot = Spot {
             player_id: 1,
             opponent: Some("BOS".to_string()),
@@ -1233,6 +1751,19 @@ mod tests {
         let score = load_score(&directory, "2025-26", "Regular Season", "points").unwrap();
         assert_eq!(score.fitted_at.as_deref(), Some("2026-10-07T18:00:00Z"));
         assert!(score.settings_stored);
+        assert_eq!(score.seeded_from, None);
+        let before = last_season();
+        let seeded =
+            train_one(&games, &spec(0.08), "2025-26", "Regular Season", Some(&seed(&before))).unwrap();
+        let original = predict_spot(&seeded, &games, &spot, "last_10", 15.0).unwrap();
+        save_model(&seeded, "2026-10-07T18:00:00Z", &directory).unwrap();
+        let loaded = load_model(&directory, "2025-26", "Regular Season", "points").unwrap();
+        let again = predict_spot(&loaded, &games, &spot, "last_10", 15.0).unwrap();
+        assert!((again.mean - original.mean).abs() < 1e-6, "{} {}", again.mean, original.mean);
+        assert_eq!(loaded.parts[0].carry, seeded.parts[0].carry);
+        let score = load_score(&directory, "2025-26", "Regular Season", "points").unwrap();
+        assert_eq!(score.seeded_from.as_deref(), Some("2024-25 Regular Season"));
+        assert_eq!(score.carry_minutes, Some(400.0));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
@@ -1247,7 +1778,7 @@ mod tests {
                 games.push(row);
             }
         }
-        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap();
         let spot = Spot {
             player_id: 3,
             opponent: Some("BOS".to_string()),
@@ -1266,7 +1797,7 @@ mod tests {
     #[test]
     fn a_failed_save_leaves_the_old_model_loadable() {
         let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
-        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap();
         let directory = std::env::temp_dir().join(format!("open-prop-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         save_model(&fitted, "2026-10-07T18:00:00Z", &directory).unwrap();
@@ -1310,9 +1841,9 @@ mod tests {
     #[test]
     fn a_playoffs_fit_does_not_overwrite_the_regular_season() {
         let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
-        let regular = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
-        let playoffs = train_one(&games, &spec(0.08), "2025-26", "Playoffs").unwrap();
-        let older = train_one(&games, &spec(0.08), "2024-25", "Regular Season").unwrap();
+        let regular = train_one(&games, &spec(0.08), "2025-26", "Regular Season", None).unwrap();
+        let playoffs = train_one(&games, &spec(0.08), "2025-26", "Playoffs", None).unwrap();
+        let older = train_one(&games, &spec(0.08), "2024-25", "Regular Season", None).unwrap();
         let directory = std::env::temp_dir().join(format!("open-prop-seasons-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         save_model(&regular, "2026-10-07T18:00:00Z", &directory).unwrap();
@@ -1334,7 +1865,7 @@ mod tests {
     #[test]
     fn a_single_file_model_moves_to_its_own_season() {
         let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
-        let playoffs = train_one(&games, &spec(0.08), "2024-25", "Playoffs").unwrap();
+        let playoffs = train_one(&games, &spec(0.08), "2024-25", "Playoffs", None).unwrap();
         let directory = std::env::temp_dir().join(format!("open-prop-legacy-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         save_model(&playoffs, "2026-10-07T18:00:00Z", &directory).unwrap();

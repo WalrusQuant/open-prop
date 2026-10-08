@@ -1,4 +1,5 @@
 import { errorText, inTauri, loadBootstrap, syncSeason } from "./api";
+import { seedSource } from "./season";
 import type { CatalogItem, SeasonStatus } from "./types";
 
 export const session = $state({
@@ -7,6 +8,8 @@ export const session = $state({
   syncing: false,
   /** Lives here, not on Home, so leaving the page does not re-enable Refit mid-fit. */
   training: false,
+  /** Carry last season into the next refit. Kept here so it survives a page change. */
+  seed: true,
   error: null as string | null,
   notice: null as string | null,
   warning: null as string | null,
@@ -25,6 +28,25 @@ export function currentStatus(): SeasonStatus | undefined {
   return session.seasons.find(
     (item) => item.season === session.season && item.seasonType === session.seasonType,
   );
+}
+
+/** The season the current pick carries, when it is cached. */
+export function cachedSeed(): SeasonStatus | undefined {
+  const source = seedSource(session.season, session.seasonType);
+  if (!source) return undefined;
+  return session.seasons.find(
+    (item) => item.season === source.season && item.seasonType === source.seasonType && item.games > 0,
+  );
+}
+
+/** Carry is on and has a season to carry, so players are listed before their first game. */
+export function carrying(): boolean {
+  return session.seed && cachedSeed() != null;
+}
+
+/** Players can be listed: this season has games, or carry lists last season's players. */
+export function playersReady(): boolean {
+  return (currentStatus()?.games ?? 0) > 0 || carrying();
 }
 
 export async function openDesk() {
@@ -50,10 +72,12 @@ export async function syncCurrent() {
   session.warning = null;
   try {
     const report = await syncSeason(session.season, session.seasonType);
+    const roster =
+      report.rosterPlayers != null ? ` Rosters list ${report.rosterPlayers.toLocaleString()} players.` : "";
     if (report.warning) {
-      session.warning = report.warning;
+      session.warning = `${report.warning}${roster}`;
     } else {
-      session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.`;
+      session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.${roster}`;
     }
     const data = await loadBootstrap();
     session.seasons = data.seasons;

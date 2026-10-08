@@ -5,5 +5,7 @@
   "shift_prior": 0.1,
   "role_minutes": [15, 28],
   "home_sd": 0.08,
-  "rest_sd": 0.015
+  "rest_sd": 0.015,
+  "carry_minutes": 1000,
+  "opponent_carry_minutes": 1500
 }

@@ -2,6 +2,7 @@
   import { errorText, inTauri, loadPrediction } from "$lib/api";
   import { atLeast } from "$lib/deskMath";
   import { formatLine, formatStat } from "$lib/format";
+  import { seedLabel } from "$lib/season";
   import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { Prediction } from "$lib/types";
 
@@ -148,6 +149,11 @@
         {/if}
       </dl>
     </div>
+    {#if prediction.priorFrom}
+      <p class="quiet">
+        Prior from {seedLabel(prediction.priorFrom)}. His games last season still outweigh this one.
+      </p>
+    {/if}
   {:else if modelError}
     <p class="quiet">
       {modelError}

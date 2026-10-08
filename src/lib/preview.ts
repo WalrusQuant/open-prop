@@ -169,16 +169,33 @@ export function previewBootstrap(): Bootstrap {
   };
 }
 
-export function previewPlayers(): PlayerOption[] {
+const PREVIEW_SEASON = "2025-26";
+const PREVIEW_TYPE = "Regular Season";
+
+function cachedInPreview(season: string, seasonType: string): boolean {
+  return season === PREVIEW_SEASON && seasonType === PREVIEW_TYPE;
+}
+
+/** The invented season is 2025-26. With carry, 2026-27 lists its players before their first game. */
+export function previewPlayers(
+  season = PREVIEW_SEASON,
+  seasonType = PREVIEW_TYPE,
+  carry = false,
+): PlayerOption[] {
+  const cached = cachedInPreview(season, seasonType);
+  const carried = carry && season === "2026-27" && seasonType === PREVIEW_TYPE;
+  if (!cached && !carried) return [];
   return PLAYERS.map((player) => ({
     playerId: player.playerId,
     name: player.name,
     team: player.team,
-    games: ROWS.filter((row) => row.playerId === player.playerId).length,
+    games: cached ? ROWS.filter((row) => row.playerId === player.playerId).length : 0,
+    teamSource: cached ? "season" : "lastSeason",
   }));
 }
 
 export function previewTrend(query: TrendQuery): TrendReport {
+  if (!cachedInPreview(query.season, query.seasonType)) return previewNoGames(query);
   const label = STATS.find((item) => item.id === query.stat)?.label ?? query.stat;
   const windowLabel = WINDOWS.find((item) => item.id === query.window)?.label ?? query.window;
   const owned = ROWS.filter((row) => row.playerId === query.playerId).sort((left, right) =>
@@ -238,6 +255,9 @@ export function previewTrend(query: TrendQuery): TrendReport {
     window: query.window,
     windowLabel,
     line: query.line,
+    noGames: false,
+    teamSource: "season",
+    lastSeason: null,
     games,
     summary: {
       sample: values.length,
@@ -287,4 +307,45 @@ export function previewBoard(query: BoardQuery): BoardRow[] {
     const rightRate = right.last10.games ? right.last10.overs / right.last10.games : 0;
     return rightRate - leftRate || right.last10.overs - left.last10.overs || left.name.localeCompare(right.name);
   });
+}
+
+/** A carried player before his first game: empty windows, and the invented season as last season. */
+function previewNoGames(query: TrendQuery): TrendReport {
+  const whole = previewTrend({ ...query, season: PREVIEW_SEASON, seasonType: PREVIEW_TYPE, window: "season" });
+  const season = whole.splits.find((item) => item.window === "season") ?? null;
+  return {
+    ...whole,
+    season: query.season,
+    seasonType: query.seasonType,
+    window: query.window,
+    windowLabel: WINDOWS.find((item) => item.id === query.window)?.label ?? query.window,
+    games: [],
+    summary: {
+      sample: 0,
+      overs: 0,
+      hitRate: null,
+      wilsonLow: null,
+      wilsonHigh: null,
+      mean: null,
+      median: null,
+      sd: null,
+      min: null,
+      max: null,
+      dnp: 0,
+    },
+    splits: whole.splits.map((item) => ({
+      ...item,
+      sample: 0,
+      overs: 0,
+      hitRate: null,
+      wilsonLow: null,
+      wilsonHigh: null,
+      dnp: 0,
+    })),
+    noGames: true,
+    teamSource: "lastSeason",
+    lastSeason: season
+      ? { season: `${PREVIEW_SEASON} ${PREVIEW_TYPE}`, split: season, median: whole.summary.median }
+      : null,
+  };
 }

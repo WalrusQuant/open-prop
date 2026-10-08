@@ -25,14 +25,18 @@ pub fn suggested_season(today: NaiveDate) -> String {
     format_season(start)
 }
 
-pub fn season_starts(today: NaiveDate) -> Vec<i32> {
-    let suggested = season_start_year(&suggested_season(today)).unwrap_or(today.year() - 1);
-    let upcoming = if today.month() >= 7 {
+/// From July the rosters belong to the season that opens in October.
+fn upcoming_start(today: NaiveDate) -> i32 {
+    if today.month() >= 7 {
         today.year()
     } else {
         today.year() - 1
-    };
-    let last = suggested.max(upcoming);
+    }
+}
+
+pub fn season_starts(today: NaiveDate) -> Vec<i32> {
+    let suggested = season_start_year(&suggested_season(today)).unwrap_or(today.year() - 1);
+    let last = suggested.max(upcoming_start(today));
     (FIRST_SEASON_START..=last).collect()
 }
 
@@ -56,6 +60,23 @@ pub fn validate_season_type(value: &str) -> AppResult<String> {
             "Season type has to be Regular Season or Playoffs.".to_string(),
         ))
     }
+}
+
+/// True for the season that today's rosters belong to: the one on now, or from July the one
+/// about to open. The roster call answers with today's teams whatever season it is asked for.
+pub fn is_roster_season(season: &str, today: NaiveDate) -> bool {
+    season_start_year(season) == Some(upcoming_start(today))
+}
+
+/// Where a fit borrows its prior: playoffs from the same regular season, a regular season
+/// from the one before.
+pub fn seed_source(season: &str, season_type: &str) -> Option<(String, String)> {
+    let regular = SEASON_TYPES[0].to_string();
+    if season_type == SEASON_TYPES[1] {
+        return Some((season.to_string(), regular));
+    }
+    let start = season_start_year(season)?;
+    Some((format_season(start - 1), regular))
 }
 
 fn season_start_year(value: &str) -> Option<i32> {
@@ -97,6 +118,37 @@ mod tests {
         assert!(starts.contains(&2025));
         assert!(starts.contains(&2026));
         assert_eq!(*starts.first().unwrap(), 2021);
+    }
+
+    #[test]
+    fn playoffs_seed_from_their_regular_season_and_a_season_from_the_last() {
+        let regular = "Regular Season".to_string();
+        assert_eq!(
+            seed_source("2025-26", "Playoffs"),
+            Some(("2025-26".to_string(), regular.clone()))
+        );
+        assert_eq!(
+            seed_source("2025-26", "Regular Season"),
+            Some(("2024-25".to_string(), regular.clone()))
+        );
+        assert_eq!(
+            seed_source("2000-01", "Regular Season"),
+            Some(("1999-00".to_string(), regular))
+        );
+        assert_eq!(seed_source("season", "Regular Season"), None);
+    }
+
+    #[test]
+    fn rosters_are_for_the_season_on_now_or_about_to_open() {
+        // Before opening night today's rosters are next season's, not the one that finished.
+        let today = day("2026-10-08");
+        assert!(is_roster_season("2026-27", today));
+        assert!(!is_roster_season("2025-26", today));
+        assert!(!is_roster_season("2024-25", today));
+        assert!(is_roster_season("2025-26", day("2026-03-01")));
+        assert!(is_roster_season("2025-26", day("2026-06-30")));
+        assert!(!is_roster_season("2025-26", day("2026-07-01")));
+        assert!(!is_roster_season("season", today));
     }
 
     #[test]

@@ -226,6 +226,8 @@ pub struct SyncReport {
     pub synced_at: Option<String>,
     /// Set when the response was empty or short and the cache was kept.
     pub warning: Option<String>,
+    /// Players on this season's rosters, when the roster call ran and answered.
+    pub roster_players: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,7 +236,29 @@ pub struct PlayerOption {
     pub player_id: i64,
     pub name: String,
     pub team: String,
+    /// Games this season. 0 means he is listed from last season or the roster.
     pub games: i64,
+    pub team_source: TeamSource,
+}
+
+/// Where a listed team comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum TeamSource {
+    /// His latest game this season.
+    Season,
+    /// The league roster call for this season.
+    Roster,
+    /// His latest game in the season this one carries.
+    LastSeason,
+}
+
+/// One player on a team, from the league roster call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RosterEntry {
+    pub player_id: i64,
+    pub name: String,
+    pub team_abbr: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -319,6 +343,21 @@ pub struct TrendReport {
     pub summary: TrendSummary,
     /// Last 5, last 10, last 20, and the season against the same line.
     pub splits: Vec<TrendSplit>,
+    /// True when he has no games this season. The games and splits are empty.
+    pub no_games: bool,
+    pub team_source: TeamSource,
+    /// His carried season against the same line, only when this season has no games.
+    pub last_season: Option<LastSeason>,
+}
+
+/// A whole earlier season scored against the line, labelled with that season.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSeason {
+    /// "2025-26 Regular Season".
+    pub season: String,
+    pub split: TrendSplit,
+    pub median: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -359,6 +398,13 @@ pub struct BoardRow {
 pub struct TrainQuery {
     pub season: String,
     pub season_type: String,
+    /// Carry last season into the priors when it is cached. Playoffs carry their regular season.
+    #[serde(default = "default_seed")]
+    pub seed: bool,
+}
+
+fn default_seed() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -380,6 +426,10 @@ pub struct TrainStatReport {
     pub rest_per_day: Option<f64>,
     /// True when this fit stored its priors. False means the numbers are the spec on disk.
     pub settings_stored: bool,
+    /// The season this fit carried its priors from, like "2024-25 Regular Season".
+    pub seeded_from: Option<String>,
+    pub carry_minutes: Option<f64>,
+    pub opponent_carry_minutes: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -388,6 +438,8 @@ pub struct TrainReport {
     pub season: String,
     pub season_type: String,
     pub stats: Vec<TrainStatReport>,
+    /// Set when a seed was asked for but its season is not cached.
+    pub seed_note: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -433,6 +485,8 @@ pub struct Prediction {
     pub holdout_coverage: Option<f64>,
     pub train_rows: usize,
     pub holdout_rows: usize,
+    /// Set while last season's carry outweighs this season's games, like "2024-25 Regular Season".
+    pub prior_from: Option<String>,
 }
 
 #[cfg(test)]
