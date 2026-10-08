@@ -37,9 +37,10 @@ export async function syncSeason(season: string, seasonType: string): Promise<Sy
   return command<SyncReport>("sync_season", { season, seasonType });
 }
 
-export async function loadPlayers(season: string, seasonType: string): Promise<PlayerOption[]> {
-  if (!inTauri()) return previewPlayers();
-  return command<PlayerOption[]>("players", { season, seasonType });
+/** With `carry`, players from the carried season and this season's rosters are listed before their first game. */
+export async function loadPlayers(season: string, seasonType: string, carry = false): Promise<PlayerOption[]> {
+  if (!inTauri()) return previewPlayers(season, seasonType, carry);
+  return command<PlayerOption[]>("players", { season, seasonType, carry });
 }
 
 export async function loadTrend(query: TrendQuery): Promise<TrendReport> {

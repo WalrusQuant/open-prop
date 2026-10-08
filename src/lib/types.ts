@@ -32,13 +32,28 @@ export interface SyncReport {
   syncedAt: string | null;
   /** Set when the response was empty or short and the cache was kept. */
   warning: string | null;
+  /** Players on this season's rosters, when the roster call ran and answered. */
+  rosterPlayers: number | null;
 }
+
+/** Where a listed team comes from: his latest game this season, the roster call, or last season. */
+export type TeamSource = "season" | "roster" | "lastSeason";
 
 export interface PlayerOption {
   playerId: number;
   name: string;
   team: string;
+  /** Games this season. 0 means he is listed from last season or the roster. */
   games: number;
+  teamSource: TeamSource;
+}
+
+/** A whole carried season scored against the number. */
+export interface LastSeason {
+  /** "2025-26 Regular Season". */
+  season: string;
+  split: TrendSplit;
+  median: number | null;
 }
 
 export interface TrendQuery {
@@ -113,6 +128,11 @@ export interface TrendReport {
   summary: TrendSummary;
   /** Last 5, last 10, last 20, and the season against the same line. */
   splits: TrendSplit[];
+  /** True when he has no games this season. The games and splits are empty. */
+  noGames: boolean;
+  teamSource: TeamSource;
+  /** His carried season against the same line, only when this season has no games. */
+  lastSeason: LastSeason | null;
 }
 
 export interface BoardQuery {

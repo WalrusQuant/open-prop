@@ -6,9 +6,10 @@
   import Prediction from "$lib/components/Prediction.svelte";
   import TrendChart from "$lib/components/TrendChart.svelte";
   import { errorText, loadPlayers, loadTrend } from "$lib/api";
+  import { lastSeasonSentence, teamNote } from "$lib/carry";
   import { chipOrder, statShort, windowShort } from "$lib/catalog";
   import { dnpSentence, downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
-  import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
+  import { cachedSeed, carrying, playersReady, session, syncCurrent } from "$lib/session.svelte";
   import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { PlayerOption, Prediction as Projection, TrendGame, TrendReport } from "$lib/types";
 
@@ -41,7 +42,12 @@
   let minutesText = $state("");
   let minutesFor = $state("");
 
-  let synced = $derived((currentStatus()?.games ?? 0) > 0);
+  // With carry on, last season's players are listed before this season has a game.
+  let synced = $derived(playersReady());
+  let carriedSeason = $derived.by(() => {
+    const seed = cachedSeed();
+    return seed ? `${seed.season} ${seed.seasonType}` : null;
+  });
   let mark = $derived(Number.isFinite(line) ? line : 0);
   let home = $derived(site === "home");
   let teams = $derived(
@@ -77,17 +83,17 @@
 
   $effect(() => {
     if (!session.ready) return;
-    const games = currentStatus()?.games ?? 0;
     const nextSeason = session.season;
     const nextType = session.seasonType;
-    if (games === 0) {
+    const carry = carrying();
+    if (!playersReady()) {
       players = [];
       return;
     }
-    loadPlayers(nextSeason, nextType)
+    loadPlayers(nextSeason, nextType, carry)
       .then((rows) => {
         if (nextSeason !== session.season || nextType !== session.seasonType) return;
-        if ((currentStatus()?.games ?? 0) === 0) return;
+        if (!playersReady()) return;
         players = rows;
       })
       .catch((caught: unknown) => {
@@ -164,9 +170,11 @@
     loadTrend(query)
       .then((next) => {
         if (id !== requestId) return;
-        if (!held && appliedMedian !== medianKey && next.summary.median != null) {
+        // Before his first game the number starts from last season's median.
+        const median = next.summary.median ?? next.lastSeason?.median ?? null;
+        if (!held && appliedMedian !== medianKey && median != null) {
           appliedMedian = medianKey;
-          const suggested = round1(next.summary.median);
+          const suggested = round1(median);
           if (suggested !== currentLine) {
             line = suggested;
             return;
@@ -196,10 +204,13 @@
   }
 
   function useMedian() {
-    if (report?.summary.median == null) return;
+    const median = report?.summary.median ?? report?.lastSeason?.median ?? null;
+    if (median == null) return;
     lineHeld = true;
-    line = round1(report.summary.median);
+    line = round1(median);
   }
+
+  let note = $derived(report ? teamNote(report.teamSource, carriedSeason) : null);
 
   function signed(value: number, against: number): string {
     const delta = round1(value - against);
@@ -257,7 +268,11 @@
       {#if report}
         <header class="identity">
           <div>
-            <p class="team">{report.team}</p>
+            <p class="team">
+              {report.team}
+              {#if note}<span class="team-note">{note}</span>{/if}
+              {#if report.noGames}<span class="team-note">No games this season yet</span>{/if}
+            </p>
             <h1>{report.playerName}</h1>
           </div>
         </header>
@@ -301,7 +316,12 @@
       </p>
       <div class="number-actions">
         <button type="button" class="ghost" onclick={useMedian}>Use the median</button>
-        <button type="button" class="ghost" disabled={!report} onclick={() => report && downloadCsv(report)}>
+        <button
+          type="button"
+          class="ghost"
+          disabled={!report || report.noGames}
+          onclick={() => report && downloadCsv(report)}
+        >
           CSV
         </button>
       </div>
@@ -347,7 +367,7 @@
             min="0"
             max="60"
             step="0.1"
-            placeholder="Last 10"
+            placeholder={report.noGames ? "Last season" : "Last 10"}
             value={minutesText}
             oninput={(event) => {
               minutesText = event.currentTarget.value;
@@ -377,7 +397,7 @@
         games={report.games}
         line={mark}
         trendMean={report.summary.mean}
-        windowLabel={report.windowLabel}
+        windowLabel={report.noGames ? "No games yet" : report.windowLabel}
         statLabel={report.statLabel}
         mean={projection?.mean ?? null}
         pmf={projection?.pmf ?? null}
@@ -389,6 +409,12 @@
         <p class="kicker">Trend</p>
         <h2>How often the games were {formatLine(report.line)} {(report.statLabel).toLowerCase()} or more</h2>
       </header>
+    {#if report.noGames}
+      <p class="band">No games this season yet.</p>
+      {#if report.lastSeason}
+        <p class="cuts">{lastSeasonSentence(report.lastSeason, report.line)}</p>
+      {/if}
+    {:else}
     <div class="splits" role="group" aria-label="How often the games reached the number">
       {#each splits as item (item.id)}
         <button
@@ -499,6 +525,7 @@
         </tbody>
       </table>
     </div>
+    {/if}
     </section>
     </div>
   {:else if playerId == null}

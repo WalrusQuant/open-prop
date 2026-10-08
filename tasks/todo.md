@@ -91,5 +91,7 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [x] `sync-season` and `backtest-prior` bins. Backtest on the first 10 team games of 2024-25 and 2025-26.
 - [ ] A time decay on the rate carry. At the end of 2025-26 the carry is within 0.02 holdout MAE of no carry on points and PRA; a decay could close that.
 - [ ] Per-stat `carry_minutes`. Only points, rebounds, assists, threes, and PRA were backtested; the other nine use the same 1000.
-- [ ] Day one. A player with no game this season is not in the player list yet, so the first prediction is after his first game is synced.
+- [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player is priced at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
+- [ ] The playoff list at 0 games is every regular-season player, because playoffs carry the regular season and the roster call does not know who made the playoffs.
+- [ ] The roster only drops carried players without a game this season. A player waived mid-season keeps his row until the season is refit.
 - [ ] Clicked through in the browser preview only, not in the Tauri webview.

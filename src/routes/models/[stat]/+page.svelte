@@ -181,6 +181,11 @@
         {/if}
         Coverage is how often the actual stat landed in the middle 80% of the predictive distribution.
       </p>
+    {:else if row?.seededFrom && row.error == null}
+      <p>
+        No {session.season} games to test on yet. This fit stands on {row.seededFrom}. The test fills
+        in once the season has games and you refit.
+      </p>
     {:else}
       <p>No test yet. Refit the season on the home page.</p>
     {/if}

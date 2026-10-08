@@ -88,9 +88,17 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     minutes start from last season's average, counted as three games. Each opponent multiplier
     starts from last season's, pulled toward 1. A rookie keeps the role prior. A traded player keeps
     his own carry, because the multipliers belong to opponents, not teammates. A player with carry
-    can be priced after his first game. Everyone else waits for five. The cap came from a backtest
+    can be priced before his first game. Everyone else waits for five. The cap came from a backtest
     on the first 10 team games of the last two seasons, where every game was predicted from earlier
     games only. Untick "Carry last season" on the home page to fit without it.
+  </p>
+  <p>
+    Before opening night the player list is this season's rosters and everyone from last season.
+    A sync of the current season asks stats.nba.com for the rosters, so a player on no roster drops
+    out and a traded player shows his new team. If that call fails, his team is the last one he
+    played for, and his page says so. With no games yet, the trend says so and shows last season's
+    hit rate, labelled. On each carried player's first game of 2025-26, the carry cut points log
+    loss from 5.83 to 3.31 against the role prior alone.
   </p>
   <p>
     The spec for each stat is <code>models/specs</code> in the source tree: prior minutes, opponent

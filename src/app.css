@@ -417,6 +417,12 @@ button.chip.on {
   text-transform: uppercase;
 }
 
+.identity .team-note {
+  margin-left: 0.6rem;
+  letter-spacing: 0.06em;
+  text-transform: none;
+}
+
 .identity .asking {
   margin: 0 0 0.15rem;
   color: var(--muted);

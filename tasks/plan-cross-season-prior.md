@@ -237,3 +237,25 @@ cargo run --release --bin backtest-prior -- /tmp/backtest.db 2025-26 2024-25 100
 ```
 
 Each `backtest-prior` run takes about 10 seconds for five stats in release mode.
+
+## Opening night (follow-up)
+
+Before the first game the list had no carried players, so the first price came after one synced
+game. The follow-up lists every seed-season player when carry is on, takes teams from a stored
+`commonallplayers` roster, and fits with zero rows from this season. The roster is fetched only
+for the season today's rosters belong to. A failed call, or one with under 300 players, keeps the
+stored roster, and with none the team is last season's. A rookie at zero games is refused with
+the reason.
+
+`backtest-prior` scores each carried player's first game (`p-g1`). 2025-26, 464 first games, role
+prior alone against carry 1000:
+
+| Stat | LL | CRPS | Brier | ECE |
+|---|---|---|---|---|
+| PTS | 5.834 → 3.314 | 6.465 → 3.354 | 0.1770 → 0.0832 | 0.1766 → 0.0171 |
+| REB | 2.938 → 2.127 | 2.067 → 1.282 | 0.1618 → 0.0975 | 0.1534 → 0.0303 |
+| AST | 2.552 → 1.724 | 1.413 → 0.914 | 0.1574 → 0.0965 | 0.1500 → 0.0280 |
+| 3PM | 1.668 → 1.244 | 0.729 → 0.534 | 0.1695 → 0.1226 | 0.1501 → 0.0393 |
+| PRA | 6.431 → 3.705 | 9.562 → 4.551 | 0.1936 → 0.0871 | 0.1934 → 0.0386 |
+
+2024-25 (447 first games) moved the same way: PTS LL 5.624 → 3.156, PRA 6.338 → 3.543.

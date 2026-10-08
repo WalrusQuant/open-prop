@@ -81,7 +81,7 @@ A fit starts from the season before it when that season is cached. A regular sea
 
 A rookie, or anyone without minutes in the seed season, keeps the role prior. A traded player keeps his carry, because his rate is his and the multipliers belong to the opponents.
 
-Until this season has 100 rows for a stat, the fit borrows last season's role rates, minutes, home, and rest. A seeded fit does not wait for 20 training rows. A player with carry can be priced after one game. The player page says "Prior from 2024-25 Regular Season" while last season still outweighs this one. Everyone else still waits for five games. The model page names the season a fit carried. Untick "Carry last season" on the home page to fit without it, or set `carry_minutes` to 0 in one spec.
+Until this season has 100 rows for a stat, the fit borrows last season's role rates, minutes, home, and rest. A seeded fit does not wait for 20 training rows, and it fits with none, so a player with carry can be priced before his first game. The player page says "Prior from 2024-25 Regular Season" while last season still outweighs this one. Everyone else still waits for five games. The model page names the season a fit carried. Untick "Carry last season" on the home page to fit without it, or set `carry_minutes` to 0 in one spec.
 
 The shipped cap comes from a backtest on the first 10 team games of 2024-25 and 2025-26, each seeded from the season before. Every game was predicted from games before its date. Against the role prior alone, the carry cut log loss on every stat and bucket, most in team games 1 to 3, and it still helped in games 11 to 30. Caps from 500 to 2,000 scored about the same. `src-tauri/src/bin/backtest_prior.rs` reruns it on a scratch database filled by `sync-season`:
 
@@ -91,6 +91,26 @@ cargo run --release --bin sync-season -- /tmp/backtest.db 2024-25
 cargo run --release --bin sync-season -- /tmp/backtest.db 2025-26
 cargo run --release --bin backtest-prior -- /tmp/backtest.db 2025-26 2024-25 0,250,500,1000,2000 1500 10
 ```
+
+### Opening night
+
+Before a player's first game, the player list is this season's players plus everyone who played in the seed season, when that season is cached and "Carry last season" is ticked. A player without a game this season says "no games yet" in the list and on his page. Untick the carry and the list is this season's players only.
+
+His team comes from this season's rosters. A sync of the season that is on, or from July the one about to open, also calls stats.nba.com `commonallplayers` for every player on a roster and stores the answer in SQLite. A carried player who is on no roster is dropped. A player on a roster with no carry is listed, so a rookie shows up, but he is still refused. If the roster call fails, or answers with fewer than 300 players, the stored roster is kept. With no roster at all, the team is his last one in the seed season, and the player page says "Team from 2024-25". Any other season never calls it, because the endpoint answers with today's teams whatever season it is asked for. Once a player has a game, his team is the one in his latest game.
+
+At zero games his rate is the carry prior plus the role prior, his minutes start from last season's average, and opponent, home, and rest use the carried multipliers. The player page says "Prior from" the seed season. The trend says "No games this season yet" and shows last season's hit rate on the same line, labelled with that season. "Use the median" falls back to last season's median. A rookie at zero games is told he has no seed minutes to carry and waits for five games.
+
+`backtest-prior` also scores each carried player's first game of the season, the `p-g1` columns. The fit for that game sees only earlier dates, so the first night is a fit with no rows from this season. On 2025-26 seeded from 2024-25, 464 first games:
+
+| stat | log loss, role prior | log loss, carry 1,000 | CRPS, role prior | CRPS, carry 1,000 | calibration error, role prior | calibration error, carry 1,000 |
+|---|---:|---:|---:|---:|---:|---:|
+| Points | 5.834 | 3.314 | 6.465 | 3.354 | 0.177 | 0.017 |
+| Rebounds | 2.938 | 2.127 | 2.067 | 1.282 | 0.153 | 0.030 |
+| Assists | 2.552 | 1.724 | 1.413 | 0.914 | 0.150 | 0.028 |
+| Threes made | 1.668 | 1.244 | 0.729 | 0.534 | 0.150 | 0.039 |
+| PRA | 6.431 | 3.705 | 9.562 | 4.551 | 0.193 | 0.039 |
+
+2024-25 seeded from 2023-24, 447 first games, moved the same way. Points log loss went from 5.624 to 3.156 and PRA from 6.338 to 3.543. The role prior alone is far off on the first night because it prices every player in a minutes role the same.
 
 Without carry, a prediction waits until the player has five cached games. The first game of a season uses a neutral rest of 2 days, because there is no previous day in the cache. Later rest is the gap between games, capped at 14. There is no schedule feed. The opponent, the site, the rest, and the minutes are the spot you name. They are not "tomorrow".
 
@@ -154,7 +174,7 @@ cargo run --manifest-path src-tauri/Cargo.toml --bin train-season -- \
   2025-26 "Regular Season"
 ```
 
-The command prints holdout error, last-10 error, 80% coverage, and the row counts. Pass another database path, season, or season type as the three arguments. It carries the seed season when that season is in the same database. `sync-season` takes the same three arguments and fills a database without the window.
+The command prints holdout error, last-10 error, 80% coverage, and the row counts. Pass another database path, season, or season type as the three arguments. It carries the seed season when that season is in the same database, and it fits with no rows when this season has none. `sync-season` takes the same three arguments and fills a database without the window. For the season that is on, or about to open, it also stores the rosters.
 
 ## Tests
 
