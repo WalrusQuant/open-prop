@@ -8,9 +8,45 @@ use wreq_util::Emulation;
 use crate::error::{AppError, AppResult};
 use crate::models::{GameLog, RosterEntry};
 
+/// stats.nba.com team ids to the abbreviations game logs use.
+const TEAM_ABBR: &[(i64, &str)] = &[
+    (1610612737, "ATL"),
+    (1610612738, "BOS"),
+    (1610612739, "CLE"),
+    (1610612740, "NOP"),
+    (1610612741, "CHI"),
+    (1610612742, "DAL"),
+    (1610612743, "DEN"),
+    (1610612744, "GSW"),
+    (1610612745, "HOU"),
+    (1610612746, "LAC"),
+    (1610612747, "LAL"),
+    (1610612748, "MIA"),
+    (1610612749, "MIL"),
+    (1610612750, "MIN"),
+    (1610612751, "BKN"),
+    (1610612752, "NYK"),
+    (1610612753, "ORL"),
+    (1610612754, "IND"),
+    (1610612755, "PHI"),
+    (1610612756, "PHX"),
+    (1610612757, "POR"),
+    (1610612758, "SAC"),
+    (1610612759, "SAS"),
+    (1610612760, "OKC"),
+    (1610612761, "TOR"),
+    (1610612762, "UTA"),
+    (1610612763, "MEM"),
+    (1610612764, "WAS"),
+    (1610612765, "DET"),
+    (1610612766, "CHA"),
+];
+
 const GAME_LOGS_URL: &str = "https://stats.nba.com/stats/playergamelogs";
 /// Every player on a team for the season, one request for the league.
 const ROSTER_URL: &str = "https://stats.nba.com/stats/commonallplayers";
+/// Standings with clinch / play-in flags. `playoffpicture` returns HTML now.
+const STANDINGS_URL: &str = "https://stats.nba.com/stats/leaguestandingsv3";
 
 /// stats.nba.com answers a browser TLS fingerprint and returns nothing to a
 /// plain Rust or curl client. wreq sends the Chrome 136 fingerprint that the
@@ -45,6 +81,18 @@ impl NbaClient {
         ];
         let body = self.get_with_retries(ROSTER_URL, &params).await?;
         parse_roster(&body)
+    }
+
+    /// Teams still in the postseason for `season`: clinched playoffs or still in the play-in.
+    pub async fn playoff_teams(&self, season: &str) -> AppResult<Vec<String>> {
+        let params = [
+            ("LeagueID", "00"),
+            ("Season", season),
+            ("SeasonType", "Regular Season"),
+            ("SeasonYear", ""),
+        ];
+        let body = self.get_with_retries(STANDINGS_URL, &params).await?;
+        parse_playoff_teams(&body)
     }
 
     async fn get_logs(&self, season: &str, season_type: &str) -> AppResult<String> {
@@ -132,6 +180,52 @@ pub fn parse_roster(body: &str) -> AppResult<Vec<RosterEntry>> {
         });
     }
     Ok(players)
+}
+
+/// Teams with `ClinchedPostSeason` or `ClinchedPlayIn`. Play-in teams stay until the
+/// playoff game logs take over as the source of truth.
+pub fn parse_playoff_teams(body: &str) -> AppResult<Vec<String>> {
+    let (columns, rows) = result_set(body)?;
+    let mut teams = Vec::new();
+    for row in &rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        let post = flag_at(row, &columns, "ClinchedPostSeason")?;
+        let play_in = flag_at(row, &columns, "ClinchedPlayIn")?;
+        if !post && !play_in {
+            continue;
+        }
+        let team_id = number_at(row, &columns, "TeamID")? as i64;
+        let Some(abbr) = team_abbr(team_id) else {
+            continue;
+        };
+        teams.push(abbr.to_string());
+    }
+    teams.sort();
+    teams.dedup();
+    Ok(teams)
+}
+
+fn team_abbr(team_id: i64) -> Option<&'static str> {
+    TEAM_ABBR.iter().find(|(id, _)| *id == team_id).map(|(_, abbr)| *abbr)
+}
+
+/// True when the standings cell is 1 (JSON number or string).
+fn flag_at(row: &[Value], columns: &HashMap<String, usize>, name: &str) -> AppResult<bool> {
+    let Some(&index) = columns.get(name) else {
+        return Ok(false);
+    };
+    let Some(value) = row.get(index) else {
+        return Ok(false);
+    };
+    Ok(match value {
+        Value::Null => false,
+        Value::Bool(flag) => *flag,
+        Value::Number(number) => number.as_f64() == Some(1.0),
+        Value::String(text) => text == "1" || text.eq_ignore_ascii_case("true"),
+        _ => false,
+    })
 }
 
 fn result_set(body: &str) -> AppResult<(HashMap<String, usize>, Vec<Value>)> {
@@ -391,5 +485,34 @@ mod tests {
         eprintln!("{} players on {} teams", players.len(), teams.len());
         assert_eq!(teams.len(), 30, "{teams:?}");
         assert!(players.len() > 400, "{}", players.len());
+    }
+
+    /// Hits stats.nba.com. Run with `cargo test -- --ignored live_playoff`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_playoff_teams_match_the_bracket() {
+        let client = NbaClient::new().expect("chrome client");
+        let teams_25 = client.playoff_teams("2024-25").await.expect("2024-25 standings");
+        eprintln!("2024-25 playoff/play-in: {} {:?}", teams_25.len(), teams_25);
+        assert_eq!(teams_25.len(), 20, "{teams_25:?}");
+        assert!(teams_25.iter().any(|team| team == "OKC"));
+        assert!(teams_25.iter().any(|team| team == "SAC"), "play-in loser still listed until games override");
+        let teams_26 = client.playoff_teams("2025-26").await.expect("2025-26 standings");
+        eprintln!("2025-26 playoff/play-in: {} {:?}", teams_26.len(), teams_26);
+        assert_eq!(teams_26.len(), 20, "{teams_26:?}");
+        assert!(teams_26.iter().any(|team| team == "OKC"));
+        assert!(teams_26.iter().any(|team| team == "DET"));
+    }
+
+    #[test]
+    fn playoff_teams_parse_clinch_and_play_in() {
+        let body = r#"{"resultSets":[{"headers":["TeamID","ClinchedPostSeason","ClinchedPlayIn"],"rowSet":[
+            [1610612760,1,0],
+            [1610612758,0,1],
+            [1610612764,0,0],
+            [1610612738,1,0]
+        ]}]}"#;
+        let teams = parse_playoff_teams(body).unwrap();
+        assert_eq!(teams, vec!["BOS", "OKC", "SAC"]);
     }
 }

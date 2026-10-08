@@ -228,6 +228,8 @@ pub struct SyncReport {
     pub warning: Option<String>,
     /// Players on this season's rosters, when the roster call ran and answered.
     pub roster_players: Option<usize>,
+    /// Playoff/play-in teams stored for this season, when the standings call ran.
+    pub playoff_teams: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -239,6 +241,10 @@ pub struct PlayerOption {
     /// Games this season. 0 means he is listed from last season or the roster.
     pub games: i64,
     pub team_source: TeamSource,
+    /// On a roster with no seed-season minutes, so the five-game rule applies.
+    pub rookie: bool,
+    /// False when he has games but is off the current roster; the board leaves him out.
+    pub on_board: bool,
 }
 
 /// Where a listed team comes from.
@@ -251,6 +257,8 @@ pub enum TeamSource {
     Roster,
     /// His latest game in the season this one carries.
     LastSeason,
+    /// He has games this season but is on no current roster (waived or released).
+    OffRoster,
 }
 
 /// One player on a team, from the league roster call.
