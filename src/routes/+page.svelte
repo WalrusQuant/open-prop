@@ -144,7 +144,7 @@
   <div class="page-head">
     <div>
       <h2>Models</h2>
-      <p>One fit per stat. Open a stat for the test and what the model uses.</p>
+      <p>One fit per stat for {session.season} {session.seasonType}. Open a stat for the test and what the model uses.</p>
     </div>
     <button type="button" onclick={train} disabled={!desktop || session.training || !session.ready || !cached}>
       {session.training ? "Training…" : "Refit season"}

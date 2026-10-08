@@ -311,18 +311,12 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
     let (fitted, numbers) = tokio::task::spawn_blocking(move || {
         let fitted = match cached {
             Some(fitted) => fitted,
-            None => Arc::new(engine::load_model(&models_dir, stat.id()).map_err(show)?),
+            None => Arc::new(
+                engine::load_model(&models_dir, &season, &season_type, stat.id()).map_err(show)?,
+            ),
         };
-        if fitted.season != season || fitted.season_type != season_type {
-            return Err(format!(
-                "The saved {} model is for {} {}. Train this season to replace it.",
-                stat.label(),
-                fitted.season,
-                fitted.season_type
-            ));
-        }
         let numbers = engine::predict_spot(&fitted, &games, &spot, &window, line).map_err(show)?;
-        Ok((fitted, numbers))
+        Ok::<_, String>((fitted, numbers))
     })
     .await
     .map_err(|error| format!("prediction stopped: {error}"))??;
@@ -377,8 +371,8 @@ fn score_stat(
     season_type: &str,
 ) -> TrainStatReport {
     let spec = engine::load_spec(stat.id(), spec_dirs).ok();
-    let mut report = match engine::load_score(directory, stat.id()) {
-        Ok(score) if score.season == season && score.season_type == season_type => {
+    let mut report = match engine::load_score(directory, season, season_type, stat.id()) {
+        Ok(score) => {
             let mut report = bare_report(stat);
             report.train_rows = score.train_rows;
             report.holdout_rows = score.holdout_rows;
@@ -392,15 +386,6 @@ fn score_stat(
             report.home_multiplier = score.home_multiplier;
             report.rest_per_day = score.rest_per_day;
             report.settings_stored = score.settings_stored;
-            report
-        }
-        Ok(score) => {
-            let mut report = bare_report(stat);
-            report.error = Some(format!(
-                "The saved model is for {} {}.",
-                score.season, score.season_type
-            ));
-            report.fitted_at = score.fitted_at;
             report
         }
         Err(error) => {
@@ -498,6 +483,7 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
         return Err("No cached games for that season. Sync it, then train.".to_string());
     }
     let models_dir = directory.join("models");
+    engine::migrate_legacy_models(&models_dir).map_err(show)?;
     let stats = train_season(&games, &season, &season_type, &engine::spec_dirs(directory), &models_dir);
     Ok(TrainReport {
         season,
@@ -507,12 +493,17 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
 }
 
 pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, AppError> {
+    let models_dir = data_dir.join("models");
+    // Older installs kept one file per stat. A failed move leaves that file in place.
+    if let Err(error) = engine::migrate_legacy_models(&models_dir) {
+        eprintln!("could not move the old model files: {error}");
+    }
     Ok(AppState {
         db: Mutex::new(connection),
         nba: NbaClient::new()?,
         syncing: AtomicBool::new(false),
         training: AtomicBool::new(false),
-        models_dir: data_dir.join("models"),
+        models_dir,
         spec_dirs: engine::spec_dirs(data_dir),
         fitted: ModelCache::new(),
     })

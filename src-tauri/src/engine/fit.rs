@@ -82,8 +82,6 @@ pub struct PredictNumbers {
 
 #[derive(Debug, Clone)]
 pub struct ModelScore {
-    pub season: String,
-    pub season_type: String,
     pub train_rows: usize,
     pub holdout_rows: usize,
     pub holdout_mae: Option<f64>,
@@ -279,8 +277,13 @@ pub fn predict_spot(
     })
 }
 
+/// Saves to `<models>/<season>/<season type>/<stat>.json`, so fits for different
+/// seasons and season types sit side by side.
 pub fn save_model(fitted: &Fitted, fitted_at: &str, directory: &Path) -> AppResult<()> {
-    std::fs::create_dir_all(directory)?;
+    let path = model_path(directory, &fitted.season, &fitted.season_type, &fitted.stat);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
     let saved = SavedModel {
         kind: "boxscore".to_string(),
         stat: fitted.stat.clone(),
@@ -299,7 +302,6 @@ pub fn save_model(fitted: &Fitted, fitted_at: &str, directory: &Path) -> AppResu
         rest_per_day: fitted.rest_per_day,
         fitted_at: Some(fitted_at.to_string()),
     };
-    let path = directory.join(format!("{}.json", fitted.stat));
     write_atomic(&path, |writer| {
         serde_json::to_writer(writer, &saved)?;
         Ok(())
@@ -339,8 +341,8 @@ fn write_atomic(
     Ok(())
 }
 
-pub fn load_model(directory: &Path, stat: &str) -> AppResult<Fitted> {
-    let saved = read_saved(directory, stat)?;
+pub fn load_model(directory: &Path, season: &str, season_type: &str, stat: &str) -> AppResult<Fitted> {
+    let saved = read_saved(directory, season, season_type, stat)?;
     Ok(Fitted {
         stat: saved.stat,
         season: saved.season,
@@ -359,11 +361,14 @@ pub fn load_model(directory: &Path, stat: &str) -> AppResult<Fitted> {
     })
 }
 
-pub fn load_score(directory: &Path, stat: &str) -> AppResult<ModelScore> {
-    let saved = read_saved(directory, stat)?;
+pub fn load_score(
+    directory: &Path,
+    season: &str,
+    season_type: &str,
+    stat: &str,
+) -> AppResult<ModelScore> {
+    let saved = read_saved(directory, season, season_type, stat)?;
     Ok(ModelScore {
-        season: saved.season,
-        season_type: saved.season_type,
         train_rows: saved.train_rows,
         holdout_rows: saved.holdout_rows,
         holdout_mae: saved.holdout_mae,
@@ -1000,10 +1005,83 @@ struct SavedModel {
     fitted_at: Option<String>,
 }
 
-fn read_saved(directory: &Path, stat: &str) -> AppResult<SavedModel> {
-    let path = directory.join(format!("{stat}.json"));
+/// `Regular Season` becomes `regular-season`. Anything outside letters and digits becomes a dash.
+fn path_part(value: &str) -> String {
+    value
+        .trim()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect()
+}
+
+pub fn model_path(directory: &Path, season: &str, season_type: &str, stat: &str) -> PathBuf {
+    directory
+        .join(path_part(season))
+        .join(path_part(season_type))
+        .join(format!("{}.json", path_part(stat).replace('-', "_")))
+}
+
+/// Files from before per-season fits sit at `<models>/<stat>.json`. Each one moves
+/// to the season and type it was fit on, unless a newer fit already holds that
+/// slot. Files that do not parse stay where they are. Returns how many moved.
+pub fn migrate_legacy_models(directory: &Path) -> AppResult<usize> {
+    if !directory.is_dir() {
+        return Ok(0);
+    }
+    let mut moved = 0;
+    for entry in std::fs::read_dir(directory)? {
+        let path = entry?.path();
+        let is_json = path.extension().and_then(|value| value.to_str()) == Some("json");
+        let hidden = path
+            .file_name()
+            .and_then(|value| value.to_str())
+            .is_some_and(|name| name.starts_with('.'));
+        if !path.is_file() || !is_json || hidden {
+            continue;
+        }
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else {
+            continue;
+        };
+        let field = |name: &str| value.get(name).and_then(|item| item.as_str()).map(str::to_string);
+        let (Some(stat), Some(season), Some(season_type)) =
+            (field("stat"), field("season"), field("season_type"))
+        else {
+            continue;
+        };
+        if Stat::parse(&stat).is_none()
+            || crate::season::validate_season(&season).is_err()
+            || crate::season::validate_season_type(&season_type).is_err()
+        {
+            continue;
+        }
+        let target = model_path(directory, &season, &season_type, &stat);
+        if target.exists() {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::rename(&path, &target)?;
+        moved += 1;
+    }
+    Ok(moved)
+}
+
+fn read_saved(directory: &Path, season: &str, season_type: &str, stat: &str) -> AppResult<SavedModel> {
+    let path = model_path(directory, season, season_type, stat);
     if !path.is_file() {
-        return Err(AppError::message(format!("No trained model for {stat}.")));
+        return Err(AppError::message(format!(
+            "No trained model for {stat} in {season} {season_type}."
+        )));
     }
     let text = std::fs::read_to_string(&path)?;
     let value: serde_json::Value = serde_json::from_str(&text)?;
@@ -1017,6 +1095,12 @@ fn read_saved(directory: &Path, stat: &str) -> AppResult<SavedModel> {
         return Err(AppError::message(format!(
             "The file for {stat} says {}.",
             saved.stat
+        )));
+    }
+    if saved.season != season || saved.season_type != season_type {
+        return Err(AppError::message(format!(
+            "The {stat} file for {season} {season_type} says {} {}. Refit this season.",
+            saved.season, saved.season_type
         )));
     }
     if saved.parts.is_empty() {
@@ -1143,10 +1227,10 @@ mod tests {
         let original = predict_spot(&fitted, &games, &spot, "last_10", 15.0).unwrap();
         let directory = std::env::temp_dir().join(format!("open-prop-bayes-{}", std::process::id()));
         save_model(&fitted, "2026-10-07T18:00:00Z", &directory).unwrap();
-        let loaded = load_model(&directory, "points").unwrap();
+        let loaded = load_model(&directory, "2025-26", "Regular Season", "points").unwrap();
         let again = predict_spot(&loaded, &games, &spot, "last_10", 15.0).unwrap();
         assert!((again.mean - original.mean).abs() < 1e-6, "{} {}", again.mean, original.mean);
-        let score = load_score(&directory, "points").unwrap();
+        let score = load_score(&directory, "2025-26", "Regular Season", "points").unwrap();
         assert_eq!(score.fitted_at.as_deref(), Some("2026-10-07T18:00:00Z"));
         assert!(score.settings_stored);
         let _ = std::fs::remove_dir_all(&directory);
@@ -1159,23 +1243,23 @@ mod tests {
         let directory = std::env::temp_dir().join(format!("open-prop-atomic-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
         save_model(&fitted, "2026-10-07T18:00:00Z", &directory).unwrap();
-        let path = directory.join("points.json");
+        let path = model_path(&directory, "2025-26", "Regular Season", "points");
         let error = write_atomic(&path, |writer| {
             writer.write_all(br#"{"kind":"boxscore","stat":"poi"#)?;
             Err(AppError::message("disk full".to_string()))
         })
         .unwrap_err();
         assert_eq!(error.to_string(), "disk full");
-        let loaded = load_model(&directory, "points").unwrap();
+        let loaded = load_model(&directory, "2025-26", "Regular Season", "points").unwrap();
         assert_eq!(loaded.season, "2025-26");
-        let leftovers: Vec<_> = std::fs::read_dir(&directory)
+        let leftovers: Vec<_> = std::fs::read_dir(path.parent().unwrap())
             .unwrap()
             .filter_map(Result::ok)
             .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
             .collect();
         assert!(leftovers.is_empty(), "a failed write cleans up its temp file");
         save_model(&fitted, "2026-10-08T18:00:00Z", &directory).unwrap();
-        let score = load_score(&directory, "points").unwrap();
+        let score = load_score(&directory, "2025-26", "Regular Season", "points").unwrap();
         assert_eq!(score.fitted_at.as_deref(), Some("2026-10-08T18:00:00Z"));
         let _ = std::fs::remove_dir_all(&directory);
     }
@@ -1183,14 +1267,62 @@ mod tests {
     #[test]
     fn an_old_tree_file_asks_for_a_refit() {
         let directory = std::env::temp_dir().join(format!("open-prop-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(
             directory.join("points.json"),
             r#"{"stat":"points","season":"2025-26","season_type":"Regular Season","booster":{}}"#,
         )
         .unwrap();
-        let error = load_model(&directory, "points").unwrap_err();
+        assert_eq!(migrate_legacy_models(&directory).unwrap(), 1);
+        let error = load_model(&directory, "2025-26", "Regular Season", "points").unwrap_err();
         assert!(error.to_string().contains("old tree model"), "{error}");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_playoffs_fit_does_not_overwrite_the_regular_season() {
+        let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
+        let regular = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let playoffs = train_one(&games, &spec(0.08), "2025-26", "Playoffs").unwrap();
+        let older = train_one(&games, &spec(0.08), "2024-25", "Regular Season").unwrap();
+        let directory = std::env::temp_dir().join(format!("open-prop-seasons-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        save_model(&regular, "2026-10-07T18:00:00Z", &directory).unwrap();
+        save_model(&playoffs, "2026-10-07T19:00:00Z", &directory).unwrap();
+        save_model(&older, "2026-10-07T20:00:00Z", &directory).unwrap();
+        assert!(directory.join("2025-26/regular-season/points.json").is_file());
+        assert!(directory.join("2025-26/playoffs/points.json").is_file());
+        let score = load_score(&directory, "2025-26", "Regular Season", "points").unwrap();
+        assert_eq!(score.fitted_at.as_deref(), Some("2026-10-07T18:00:00Z"));
+        let score = load_score(&directory, "2025-26", "Playoffs", "points").unwrap();
+        assert_eq!(score.fitted_at.as_deref(), Some("2026-10-07T19:00:00Z"));
+        let loaded = load_model(&directory, "2024-25", "Regular Season", "points").unwrap();
+        assert_eq!((loaded.season.as_str(), loaded.season_type.as_str()), ("2024-25", "Regular Season"));
+        let missing = load_model(&directory, "2023-24", "Playoffs", "points").unwrap_err();
+        assert_eq!(missing.to_string(), "No trained model for points in 2023-24 Playoffs.");
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_single_file_model_moves_to_its_own_season() {
+        let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
+        let playoffs = train_one(&games, &spec(0.08), "2024-25", "Playoffs").unwrap();
+        let directory = std::env::temp_dir().join(format!("open-prop-legacy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        save_model(&playoffs, "2026-10-07T18:00:00Z", &directory).unwrap();
+        let keyed = model_path(&directory, "2024-25", "Playoffs", "points");
+        std::fs::rename(&keyed, directory.join("points.json")).unwrap();
+        std::fs::write(directory.join("notes.json"), "not a model").unwrap();
+
+        assert_eq!(migrate_legacy_models(&directory).unwrap(), 1);
+        assert!(!directory.join("points.json").exists());
+        assert!(directory.join("notes.json").exists(), "files that are not models stay");
+        let loaded = load_model(&directory, "2024-25", "Playoffs", "points").unwrap();
+        assert_eq!(loaded.season_type, "Playoffs");
+        let other = load_model(&directory, "2025-26", "Regular Season", "points").unwrap_err();
+        assert!(other.to_string().starts_with("No trained model"), "{other}");
+        assert_eq!(migrate_legacy_models(&directory).unwrap(), 0, "a second pass moves nothing");
         let _ = std::fs::remove_dir_all(&directory);
     }
 }
