@@ -4,6 +4,8 @@ Open Prop is a desktop app for NBA game logs. It shows how often a player cleare
 
 There is no odds feed, no American price, no implied probability, and no edge. A line is just the number you typed.
 
+[Watch a one-minute demo](docs/demo.mp4).
+
 The app is a [Tauri](https://tauri.app/) shell. Rust owns the cache, the sync, and the model. The screens are Svelte. Fitted models and the database stay on your machine. They are not part of this repository.
 
 ## Screens
