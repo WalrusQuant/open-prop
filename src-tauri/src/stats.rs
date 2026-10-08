@@ -391,6 +391,8 @@ mod tests {
             team: "MIN".to_string(),
             games: 0,
             team_source: TeamSource::LastSeason,
+            rookie: false,
+            on_board: true,
         };
         let last = vec![game("2025-01-01", 30, 5, 5), game("2025-01-03", 10, 5, 5), game("2025-01-05", 26, 5, 5)];
         let report = no_games_report(

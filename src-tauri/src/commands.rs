@@ -179,8 +179,20 @@ pub async fn sync_season(
     } else {
         None
     };
+    let playoff_teams = if season_type == "Playoffs" {
+        state.nba.playoff_teams(&season).await.ok()
+    } else {
+        None
+    };
     let connection = lock_db(&state.db)?;
-    finish_sync(&connection, &season, &season_type, &games, roster.as_deref())
+    finish_sync(
+        &connection,
+        &season,
+        &season_type,
+        &games,
+        roster.as_deref(),
+        playoff_teams.as_deref(),
+    )
 }
 
 /// Rosters are for the season that is on or, from July, the one about to open. The call
@@ -189,18 +201,32 @@ fn wants_roster(season: &str) -> bool {
     season::is_roster_season(season, Local::now().date_naive())
 }
 
-/// Merges the logs, then stores the roster when the call answered. A failed or thin roster
-/// leaves the stored one, and the player list falls back to last season's teams.
+/// Merges the logs, then stores the roster and playoff field when those calls answered.
+/// A failed or thin roster leaves the stored one. An empty playoff field leaves the stored one.
 fn finish_sync(
     connection: &Connection,
     season: &str,
     season_type: &str,
     games: &[GameLog],
     roster: Option<&[RosterEntry]>,
+    playoff_teams: Option<&[String]>,
 ) -> Result<SyncReport, String> {
     let mut report = db::merge_logs(connection, season, season_type, games).map_err(show)?;
     if let Some(entries) = roster {
         report.roster_players = db::save_roster(connection, season, entries).map_err(show)?;
+    }
+    if let Some(teams) = playoff_teams {
+        report.playoff_teams = db::save_playoff_teams(connection, season, teams).map_err(show)?;
+    }
+    if season_type == "Playoffs" {
+        let filtered = db::playoff_team_filter(connection, season, season_type).map_err(show)?;
+        if filtered.is_none() {
+            let note = "Playoff teams are not filtered yet. The list is every carried player until standings or playoff games are in.";
+            report.warning = Some(match report.warning {
+                Some(existing) => format!("{existing} {note}"),
+                None => note.to_string(),
+            });
+        }
     }
     Ok(report)
 }
@@ -215,12 +241,8 @@ pub fn players(
     let season = season::validate_season(&season).map_err(show)?;
     let season_type = season::validate_season_type(&season_type).map_err(show)?;
     let connection = lock_db(&state.db)?;
-    // With carry on, last season's players and this season's rosters are listed before their first game.
-    if carry.unwrap_or(false) {
-        db::players_with_carry(&connection, &season, &season_type).map_err(show)
-    } else {
-        db::players(&connection, &season, &season_type).map_err(show)
-    }
+    // Always go through list_players so a stored roster and the playoff field apply.
+    db::list_players(&connection, &season, &season_type, carry.unwrap_or(false)).map_err(show)
 }
 
 #[tauri::command]
@@ -239,14 +261,24 @@ pub fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendRepor
     if games.is_empty() {
         return no_games_trend(&connection, &season, &season_type, query.player_id, stat, window, query.line);
     }
-    Ok(stats::trend_report(
+    let mut report = stats::trend_report(
         &games,
         stat,
         window,
         query.line,
         &season,
         &season_type,
-    ))
+    );
+    // A stored roster may have moved his team or marked him off-roster.
+    if let Some(player) = db::list_players(&connection, &season, &season_type, true)
+        .map_err(show)?
+        .into_iter()
+        .find(|player| player.player_id == query.player_id)
+    {
+        report.team = player.team;
+        report.team_source = player.team_source;
+    }
+    Ok(report)
 }
 
 /// A listed player with no game this season gets empty windows and his carried season.
@@ -259,7 +291,7 @@ fn no_games_trend(
     window: Window,
     line: f64,
 ) -> Result<TrendReport, String> {
-    let player = db::players_with_carry(connection, season, season_type)
+    let player = db::list_players(connection, season, season_type, true)
         .map_err(show)?
         .into_iter()
         .find(|player| player.player_id == player_id)
@@ -295,7 +327,13 @@ pub fn leaderboard(state: State<'_, AppState>, query: BoardQuery) -> Result<Vec<
     }
     let connection = lock_db(&state.db)?;
     let games = db::season_games(&connection, &season, &season_type).map_err(show)?;
-    Ok(stats::leaderboard(&games, stat, query.min_games, query.line))
+    let mut rows = stats::leaderboard(&games, stat, query.min_games, query.line);
+    // Waived players stay on the player page but drop out of the board when a roster is stored.
+    let on_roster = db::roster_player_ids(&connection, &season).map_err(show)?;
+    if !on_roster.is_empty() {
+        rows.retain(|row| on_roster.contains(&row.player_id));
+    }
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -676,8 +714,20 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
     } else {
         None
     };
+    let playoff_teams = if season_type == "Playoffs" {
+        runtime.block_on(client.playoff_teams(&season)).ok()
+    } else {
+        None
+    };
     let connection = db::open(db_path).map_err(show)?;
-    finish_sync(&connection, &season, &season_type, &games, roster.as_deref())
+    finish_sync(
+        &connection,
+        &season,
+        &season_type,
+        &games,
+        roster.as_deref(),
+        playoff_teams.as_deref(),
+    )
 }
 
 pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, AppError> {
@@ -730,10 +780,10 @@ mod tests {
         let connection = db::open_memory().unwrap();
         db::merge_logs(&connection, "2024-25", "Regular Season", &[log(7, "DEN", "2025-03-01", 22)]).unwrap();
         // Opening night: no games yet, and the roster call failed.
-        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], None).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], None, None).unwrap();
         assert!(report.warning.is_some());
         assert_eq!(report.roster_players, None);
-        let player = db::players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let player = db::list_players(&connection, "2025-26", "Regular Season", true).unwrap();
         assert_eq!(player[0].team, "DEN");
         assert_eq!(player[0].team_source, crate::models::TeamSource::LastSeason);
         let trend = no_games_trend(&connection, "2025-26", "Regular Season", 7, Stat::Points, Window::Last10, 20.5)
@@ -745,12 +795,66 @@ mod tests {
             .map(|id| RosterEntry { player_id: id, name: format!("P{id}"), team_abbr: "UTA".to_string() })
             .collect();
         roster.push(RosterEntry { player_id: 7, name: "P7".to_string(), team_abbr: "OKC".to_string() });
-        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], Some(&roster)).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], Some(&roster), None).unwrap();
         assert_eq!(report.roster_players, Some(401));
-        let player = db::players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let player = db::list_players(&connection, "2025-26", "Regular Season", true).unwrap();
         let seven = player.iter().find(|player| player.player_id == 7).unwrap();
         assert_eq!(seven.team, "OKC");
         assert!(no_games_trend(&connection, "2025-26", "Regular Season", 42, Stat::Points, Window::Last10, 20.5).is_err());
+    }
+
+    #[test]
+    fn playoff_sync_without_a_field_leaves_a_visible_note() {
+        let connection = db::open_memory().unwrap();
+        db::merge_logs(&connection, "2025-26", "Regular Season", &[log(7, "MIN", "2025-11-01", 20)]).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Playoffs", &[], None, None).unwrap();
+        assert!(report.warning.as_deref().unwrap_or("").contains("Playoff teams are not filtered"));
+        assert_eq!(report.playoff_teams, None);
+        // A standings answer stores the field and clears the need for that note.
+        let report = finish_sync(
+            &connection,
+            "2025-26",
+            "Playoffs",
+            &[],
+            None,
+            Some(&["MIN".into(), "BOS".into()]),
+        )
+        .unwrap();
+        assert_eq!(report.playoff_teams, Some(2));
+        assert!(
+            !report.warning.as_deref().unwrap_or("").contains("Playoff teams are not filtered"),
+            "{:?}",
+            report.warning
+        );
+    }
+
+    #[test]
+    fn the_board_leaves_out_a_player_who_is_off_the_roster() {
+        let connection = db::open_memory().unwrap();
+        let games = vec![
+            log(7, "MIN", "2025-11-01", 30),
+            log(7, "MIN", "2025-11-03", 28),
+            log(7, "MIN", "2025-11-05", 26),
+            log(7, "MIN", "2025-11-07", 24),
+            log(7, "MIN", "2025-11-09", 22),
+            log(8, "BOS", "2025-11-01", 10),
+            log(8, "BOS", "2025-11-03", 12),
+            log(8, "BOS", "2025-11-05", 11),
+            log(8, "BOS", "2025-11-07", 9),
+            log(8, "BOS", "2025-11-09", 8),
+        ];
+        db::merge_logs(&connection, "2025-26", "Regular Season", &games).unwrap();
+        let mut roster: Vec<RosterEntry> = (100..500)
+            .map(|id| RosterEntry { player_id: id, name: format!("P{id}"), team_abbr: "UTA".to_string() })
+            .collect();
+        roster.push(RosterEntry { player_id: 8, name: "P8".to_string(), team_abbr: "BOS".to_string() });
+        db::save_roster(&connection, "2025-26", &roster).unwrap();
+        let on_roster = db::roster_player_ids(&connection, "2025-26").unwrap();
+        let mut rows = crate::stats::leaderboard(&games, Stat::Points, 5, 20.0);
+        assert_eq!(rows.len(), 2);
+        rows.retain(|row| on_roster.contains(&row.player_id));
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].player_id, 8);
     }
 
     #[test]

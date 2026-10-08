@@ -34,10 +34,12 @@ export interface SyncReport {
   warning: string | null;
   /** Players on this season's rosters, when the roster call ran and answered. */
   rosterPlayers: number | null;
+  /** Playoff/play-in teams stored for this season, when the standings call ran. */
+  playoffTeams: number | null;
 }
 
-/** Where a listed team comes from: his latest game this season, the roster call, or last season. */
-export type TeamSource = "season" | "roster" | "lastSeason";
+/** Where a listed team comes from: his latest game this season, the roster call, last season, or off the roster. */
+export type TeamSource = "season" | "roster" | "lastSeason" | "offRoster";
 
 export interface PlayerOption {
   playerId: number;
@@ -46,6 +48,10 @@ export interface PlayerOption {
   /** Games this season. 0 means he is listed from last season or the roster. */
   games: number;
   teamSource: TeamSource;
+  /** On a roster with no seed-season minutes, so the five-game rule applies. */
+  rookie: boolean;
+  /** False when he has games but is off the current roster; the board leaves him out. */
+  onBoard: boolean;
 }
 
 /** A whole carried season scored against the number. */

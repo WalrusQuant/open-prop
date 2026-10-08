@@ -25,6 +25,7 @@ function report(extra: Partial<SyncReport>): SyncReport {
     syncedAt: "2026-10-07T18:00:00Z",
     warning: null,
     rosterPlayers: null,
+    playoffTeams: null,
     ...extra,
   };
 }

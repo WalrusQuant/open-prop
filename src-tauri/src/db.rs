@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS rosters (
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (season, player_id)
 );
+
+CREATE TABLE IF NOT EXISTS playoff_teams (
+    season TEXT NOT NULL,
+    team_abbr TEXT NOT NULL,
+    fetched_at TEXT NOT NULL,
+    PRIMARY KEY (season, team_abbr)
+);
 ";
 
 /// A roster answer with fewer players than this is treated as broken and the stored one is kept.
@@ -120,6 +127,7 @@ pub fn merge_logs(
             synced_at: synced_at(connection, season, season_type)?,
             warning: Some(warning),
             roster_players: None,
+            playoff_teams: None,
         });
     }
     let synced_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
@@ -177,6 +185,7 @@ pub fn merge_logs(
         synced_at: Some(synced_at),
         warning: None,
         roster_players: None,
+        playoff_teams: None,
     })
 }
 
@@ -250,68 +259,120 @@ pub fn players(connection: &Connection, season: &str, season_type: &str) -> AppR
             team: row.get(2)?,
             games: row.get(3)?,
             team_source: TeamSource::Season,
+            rookie: false,
+            on_board: true,
         })
     })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
-/// The player list with carry on: this season's players, then players from the season it
-/// carries who have no game yet, then anyone else on this season's rosters. With a stored
-/// roster, carried players who are on no roster are dropped and teams come from the roster.
-pub fn players_with_carry(
+/// Lists players for the season. With `carry`, the seed season joins in. A stored roster
+/// overrides game history for membership and team. Playoffs filter to playoff teams.
+pub fn list_players(
     connection: &Connection,
     season: &str,
     season_type: &str,
+    carry: bool,
 ) -> AppResult<Vec<PlayerOption>> {
     let current = players(connection, season, season_type)?;
-    let carried = match season::seed_source(season, season_type) {
-        Some((seed_season, seed_type)) => players(connection, &seed_season, &seed_type)?,
-        None => Vec::new(),
+    let carried = if carry {
+        match season::seed_source(season, season_type) {
+            Some((seed_season, seed_type)) => players(connection, &seed_season, &seed_type)?,
+            None => Vec::new(),
+        }
+    } else {
+        Vec::new()
     };
     let roster = roster(connection, season)?;
-    Ok(merge_players(current, carried, &roster))
+    let mut merged = merge_players(current, carried, &roster);
+    if season_type == "Playoffs" {
+        let filter = playoff_team_filter(connection, season, season_type)?;
+        if let Some(teams) = filter {
+            merged.retain(|player| teams.contains(player.team.as_str()));
+        }
+    }
+    Ok(merged)
 }
 
-/// Unions the three lists. A player keeps the first entry he has: this season, then carried, then roster.
+/// Unions the three lists. With a roster, a player who has games but is off it stays listed
+/// as off-roster (board leaves him out); a traded player's team is the roster team.
 pub fn merge_players(
     current: Vec<PlayerOption>,
     carried: Vec<PlayerOption>,
     roster: &[RosterEntry],
 ) -> Vec<PlayerOption> {
     let on_roster: HashMap<i64, &RosterEntry> = roster.iter().map(|entry| (entry.player_id, entry)).collect();
-    let mut seen: HashSet<i64> = current.iter().map(|player| player.player_id).collect();
-    let mut merged = current;
-    for player in carried {
-        if !seen.insert(player.player_id) {
-            continue;
+    let carried_ids: HashSet<i64> = carried.iter().map(|player| player.player_id).collect();
+    let mut merged = Vec::new();
+    let mut seen = HashSet::new();
+
+    if roster.is_empty() {
+        for player in current {
+            seen.insert(player.player_id);
+            merged.push(player);
         }
-        let entry = if roster.is_empty() {
-            Some(PlayerOption {
-                games: 0,
-                team_source: TeamSource::LastSeason,
-                ..player
-            })
-        } else {
-            on_roster.get(&player.player_id).map(|listed| PlayerOption {
-                team: listed.team_abbr.clone(),
-                games: 0,
-                team_source: TeamSource::Roster,
-                ..player
-            })
-        };
-        merged.extend(entry);
-    }
-    for listed in roster {
-        if seen.insert(listed.player_id) {
-            merged.push(PlayerOption {
-                player_id: listed.player_id,
-                name: listed.name.clone(),
-                team: listed.team_abbr.clone(),
-                games: 0,
-                team_source: TeamSource::Roster,
-            });
+        for player in carried {
+            if seen.insert(player.player_id) {
+                merged.push(PlayerOption {
+                    games: 0,
+                    team_source: TeamSource::LastSeason,
+                    rookie: false,
+                    on_board: true,
+                    ..player
+                });
+            }
+        }
+    } else {
+        for player in current {
+            seen.insert(player.player_id);
+            if let Some(listed) = on_roster.get(&player.player_id) {
+                merged.push(PlayerOption {
+                    team: listed.team_abbr.clone(),
+                    team_source: TeamSource::Roster,
+                    rookie: false,
+                    on_board: true,
+                    ..player
+                });
+            } else {
+                merged.push(PlayerOption {
+                    team_source: TeamSource::OffRoster,
+                    rookie: false,
+                    on_board: false,
+                    ..player
+                });
+            }
+        }
+        for player in carried {
+            if !seen.insert(player.player_id) {
+                continue;
+            }
+            if let Some(listed) = on_roster.get(&player.player_id) {
+                merged.push(PlayerOption {
+                    team: listed.team_abbr.clone(),
+                    games: 0,
+                    team_source: TeamSource::Roster,
+                    rookie: false,
+                    on_board: true,
+                    ..player
+                });
+            }
+        }
+        for listed in roster {
+            if seen.insert(listed.player_id) {
+                let rookie = !carried_ids.contains(&listed.player_id);
+                merged.push(PlayerOption {
+                    player_id: listed.player_id,
+                    name: listed.name.clone(),
+                    team: listed.team_abbr.clone(),
+                    games: 0,
+                    team_source: TeamSource::Roster,
+                    rookie,
+                    on_board: true,
+                });
+            }
         }
     }
+
     merged.sort_by(|left, right| {
         left.name
             .to_lowercase()
@@ -319,6 +380,37 @@ pub fn merge_players(
             .then(left.player_id.cmp(&right.player_id))
     });
     merged
+}
+
+/// Playoff teams for the list: teams that have playoff games when any exist, else the
+/// stored standings field. None means leave the list unfiltered.
+pub fn playoff_team_filter(
+    connection: &Connection,
+    season: &str,
+    season_type: &str,
+) -> AppResult<Option<HashSet<String>>> {
+    let from_games = teams_in_games(connection, season, season_type)?;
+    if !from_games.is_empty() {
+        return Ok(Some(from_games));
+    }
+    let stored = playoff_teams(connection, season)?;
+    if stored.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(stored.into_iter().collect()))
+    }
+}
+
+fn teams_in_games(connection: &Connection, season: &str, season_type: &str) -> AppResult<HashSet<String>> {
+    let mut statement = connection.prepare(
+        "SELECT DISTINCT team_abbr FROM game_logs WHERE season = ?1 AND season_type = ?2",
+    )?;
+    let rows = statement.query_map(params![season, season_type], |row| row.get(0))?;
+    let mut teams = HashSet::new();
+    for team in rows {
+        teams.insert(team?);
+    }
+    Ok(teams)
 }
 
 /// Replaces the stored roster for `season`. An answer under `MIN_ROSTER_PLAYERS` keeps the old one
@@ -354,6 +446,39 @@ pub fn roster(connection: &Connection, season: &str) -> AppResult<Vec<RosterEntr
             team_abbr: row.get(2)?,
         })
     })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// Player ids on the stored roster for `season`. Empty when no roster is stored.
+pub fn roster_player_ids(connection: &Connection, season: &str) -> AppResult<HashSet<i64>> {
+    Ok(roster(connection, season)?.into_iter().map(|entry| entry.player_id).collect())
+}
+
+/// Replaces the stored playoff/play-in teams for `season`. An empty answer keeps the old one.
+pub fn save_playoff_teams(connection: &Connection, season: &str, teams: &[String]) -> AppResult<Option<usize>> {
+    if teams.is_empty() {
+        return Ok(None);
+    }
+    let fetched_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute("DELETE FROM playoff_teams WHERE season = ?1", params![season])?;
+    {
+        let mut statement = transaction.prepare(
+            "INSERT OR REPLACE INTO playoff_teams (season, team_abbr, fetched_at) VALUES (?1, ?2, ?3)",
+        )?;
+        for team in teams {
+            statement.execute(params![season, team, fetched_at])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(Some(teams.len()))
+}
+
+pub fn playoff_teams(connection: &Connection, season: &str) -> AppResult<Vec<String>> {
+    let mut statement = connection.prepare(
+        "SELECT team_abbr FROM playoff_teams WHERE season = ?1 ORDER BY team_abbr",
+    )?;
+    let rows = statement.query_map(params![season], |row| row.get(0))?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
@@ -475,33 +600,114 @@ mod tests {
         let connection = opening_night();
         let plain = players(&connection, "2025-26", "Regular Season").unwrap();
         assert_eq!(plain.len(), 1);
-        let listed = players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let listed = list_players(&connection, "2025-26", "Regular Season", true).unwrap();
         let names: Vec<_> = listed.iter().map(|player| (player.player_id, player.team.as_str(), player.games)).collect();
         assert_eq!(names, vec![(7, "MIN", 1), (8, "BOS", 0), (9, "LAL", 0)]);
         assert_eq!(listed[0].team_source, TeamSource::Season);
         assert_eq!(listed[1].team_source, TeamSource::LastSeason);
-        // Playoffs carry their regular season, so every regular-season player is listed.
-        let playoffs = players_with_carry(&connection, "2025-26", "Playoffs").unwrap();
+        // Playoffs carry this season's regular season, so only those players are listed.
+        let playoffs = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
         assert_eq!(playoffs.len(), 1);
         assert_eq!(playoffs[0].team_source, TeamSource::LastSeason);
     }
 
     #[test]
-    fn a_stored_roster_moves_teams_drops_the_gone_and_adds_rookies() {
+    fn a_stored_roster_moves_teams_keeps_the_waived_and_adds_rookies() {
         let connection = opening_night();
-        let entries = roster_of(&[(8, "B Player", "PHX"), (20, "D Rookie", "SAS")]);
+        // Player 7 has games for MIN but is not on the new roster: waived, stays listed.
+        let entries = roster_of(&[
+            (8, "B Player", "PHX"),
+            (20, "D Rookie", "SAS"),
+        ]);
         assert_eq!(save_roster(&connection, "2025-26", &entries).unwrap(), Some(entries.len()));
-        let listed = players_with_carry(&connection, "2025-26", "Regular Season").unwrap();
+        let listed = list_players(&connection, "2025-26", "Regular Season", true).unwrap();
         let find = |id: i64| listed.iter().find(|player| player.player_id == id);
-        assert_eq!(find(7).unwrap().team, "MIN", "a player with games keeps his game team");
-        assert_eq!(find(8).map(|player| (player.team.as_str(), player.team_source)), Some(("PHX", TeamSource::Roster)));
-        assert!(find(9).is_none(), "on no roster, so he is gone");
+        let waived = find(7).unwrap();
+        assert_eq!(waived.team, "MIN");
+        assert_eq!(waived.team_source, TeamSource::OffRoster);
+        assert!(!waived.on_board);
+        assert_eq!(find(8).map(|player| (player.team.as_str(), player.team_source, player.on_board)), Some(("PHX", TeamSource::Roster, true)));
+        assert!(find(9).is_none(), "carried with no games and off the roster is gone");
         let rookie = find(20).unwrap();
-        assert_eq!((rookie.games, rookie.team_source), (0, TeamSource::Roster));
+        assert_eq!((rookie.games, rookie.team_source, rookie.rookie), (0, TeamSource::Roster, true));
         assert_eq!(listed.len(), 3 + MIN_ROSTER_PLAYERS);
         // A thin answer keeps the stored roster.
         assert_eq!(save_roster(&connection, "2025-26", &entries[..10]).unwrap(), None);
         assert_eq!(roster(&connection, "2025-26").unwrap().len(), entries.len());
+    }
+
+    #[test]
+    fn a_roster_overrides_the_team_of_a_player_who_still_has_games() {
+        let connection = opening_night();
+        let entries = roster_of(&[(7, "A Player", "OKC"), (8, "B Player", "PHX")]);
+        save_roster(&connection, "2025-26", &entries).unwrap();
+        let listed = list_players(&connection, "2025-26", "Regular Season", true).unwrap();
+        let seven = listed.iter().find(|player| player.player_id == 7).unwrap();
+        assert_eq!(seven.team, "OKC");
+        assert_eq!(seven.team_source, TeamSource::Roster);
+        assert!(seven.on_board);
+        assert_eq!(seven.games, 1);
+    }
+
+    #[test]
+    fn playoff_field_limits_the_list_and_games_take_over() {
+        let connection = opening_night();
+        // Put three teams in this season's regular season so playoffs can carry them.
+        merge_logs(
+            &connection,
+            "2025-26",
+            "Regular Season",
+            &[
+                sample(7, "A Player", "MIN", "2025-10-22", 25),
+                sample(8, "B Player", "BOS", "2025-10-22", 18),
+                sample(9, "C Player", "LAL", "2025-10-22", 12),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            save_playoff_teams(&connection, "2025-26", &["MIN".into(), "BOS".into()]).unwrap(),
+            Some(2)
+        );
+        let listed = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
+        let mut teams: Vec<_> = listed.iter().map(|player| player.team.as_str()).collect();
+        teams.sort();
+        assert_eq!(teams, vec!["BOS", "MIN"]);
+        // Play-in style: a third team in the field stays until games exist.
+        save_playoff_teams(&connection, "2025-26", &["MIN".into(), "BOS".into(), "LAL".into()]).unwrap();
+        let with_play_in = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
+        assert_eq!(with_play_in.len(), 3);
+        // Once a playoff game is cached, only teams in those games remain.
+        merge_logs(
+            &connection,
+            "2025-26",
+            "Playoffs",
+            &[sample(7, "A Player", "MIN", "2026-04-20", 22)],
+        )
+        .unwrap();
+        let from_games = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
+        assert_eq!(from_games.len(), 1);
+        assert_eq!(from_games[0].team, "MIN");
+    }
+
+    #[test]
+    fn without_a_playoff_field_the_list_stays_wide() {
+        let connection = opening_night();
+        merge_logs(
+            &connection,
+            "2025-26",
+            "Regular Season",
+            &[
+                sample(7, "A Player", "MIN", "2025-10-22", 25),
+                sample(8, "B Player", "BOS", "2025-10-22", 18),
+                sample(9, "C Player", "LAL", "2025-10-22", 12),
+            ],
+        )
+        .unwrap();
+        assert!(playoff_teams(&connection, "2025-26").unwrap().is_empty());
+        let listed = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
+        assert_eq!(listed.len(), 3, "fallback is every carried regular-season player");
+        assert_eq!(save_playoff_teams(&connection, "2025-26", &[]).unwrap(), None);
+        assert!(playoff_teams(&connection, "2025-26").unwrap().is_empty());
     }
 
     #[test]
