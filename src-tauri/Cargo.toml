@@ -1,0 +1,39 @@
+[package]
+name = "open-trend"
+version = "0.1.0"
+description = "Open NBA trend desk"
+authors = ["Adam Wickwire"]
+license = "Apache-2.0"
+edition = "2021"
+rust-version = "1.85"
+default-run = "open-trend"
+
+[lib]
+name = "open_trend_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "train-season"
+path = "src/bin/train_season.rs"
+
+[build-dependencies]
+tauri-build = { version = "2.7", features = [] }
+
+[dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2.12", features = [] }
+tauri-plugin-opener = "2.7"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"] }
+wreq = { version = "0.15.3", default-features = false, features = ["charset", "gzip", "brotli", "deflate", "json", "macos-system-configuration", "webpki-roots"] }
+wreq-util = "0.1.0"
+
+[profile.release]
+codegen-units = 1
+lto = true
+panic = "abort"
+strip = true

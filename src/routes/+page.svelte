@@ -1,0 +1,211 @@
+<script lang="ts">
+  import { goto } from "$app/navigation";
+  import PlayerSearch from "$lib/components/PlayerSearch.svelte";
+  import { errorText, inTauri, loadModelScores, loadPlayers, trainModels } from "$lib/api";
+  import { formatWhen } from "$lib/format";
+  import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
+  import type { PlayerOption, TrainStatReport } from "$lib/types";
+
+  let players = $state<PlayerOption[]>([]);
+  let rows = $state<TrainStatReport[]>([]);
+  let loadError = $state<string | null>(null);
+  let training = $state(false);
+  let desktop = $state(false);
+  let request = 0;
+
+  let status = $derived(currentStatus());
+  let cached = $derived((status?.games ?? 0) > 0);
+
+  $effect(() => {
+    desktop = inTauri();
+  });
+
+  $effect(() => {
+    const season = session.season;
+    const seasonType = session.seasonType;
+    if (!session.ready || (status?.games ?? 0) === 0) {
+      players = [];
+      return;
+    }
+    loadPlayers(season, seasonType)
+      .then((next) => {
+        if (season !== session.season || seasonType !== session.seasonType) return;
+        players = next;
+      })
+      .catch((caught: unknown) => {
+        loadError = errorText(caught);
+      });
+  });
+
+  $effect(() => {
+    const season = session.season;
+    const seasonType = session.seasonType;
+    if (!desktop || !session.ready) return;
+    const id = ++request;
+    loadModelScores({ season, seasonType })
+      .then((next) => {
+        if (id !== request) return;
+        rows = next;
+        loadError = null;
+      })
+      .catch((caught: unknown) => {
+        if (id !== request) return;
+        loadError = errorText(caught);
+      });
+  });
+
+  let stale = $derived(
+    rows.some((row) => row.fittedAt != null && status?.syncedAt != null && row.fittedAt < status.syncedAt),
+  );
+
+  function number(value: number | null): string {
+    return value == null ? "—" : value.toFixed(2);
+  }
+
+  function span(first: string | null, last: string | null): string {
+    if (!first || !last) return "—";
+    return `${day(first)} – ${day(last)}`;
+  }
+
+  function day(iso: string): string {
+    const [year, month, date] = iso.split("-").map(Number);
+    if (!year || !month || !date) return iso;
+    return new Intl.DateTimeFormat("en-US", {
+      month: "short",
+      day: "numeric",
+      year: "numeric",
+    }).format(new Date(year, month - 1, date));
+  }
+
+  function openPlayer(id: number) {
+    const params = new URLSearchParams({ player: String(id) });
+    void goto(`/player?${params.toString()}`);
+  }
+
+  async function train() {
+    if (!desktop || training) return;
+    training = true;
+    loadError = null;
+    try {
+      rows = (await trainModels({ season: session.season, seasonType: session.seasonType })).stats;
+    } catch (caught: unknown) {
+      loadError = errorText(caught);
+    } finally {
+      training = false;
+    }
+  }
+</script>
+
+<header class="page-head">
+  <div>
+    <h1>{session.season}</h1>
+    <p>{session.seasonType}. Cached games on this machine, and the models fit on them.</p>
+  </div>
+</header>
+
+{#if loadError}
+  <p class="banner bad">{loadError}</p>
+{/if}
+
+<section class="panel">
+  <h2>Cache</h2>
+  {#if cached && status}
+    <dl class="facts">
+      <div>
+        <dt>Games</dt>
+        <dd>{status.games.toLocaleString()}</dd>
+      </div>
+      <div>
+        <dt>Players</dt>
+        <dd>{status.players.toLocaleString()}</dd>
+      </div>
+      <div>
+        <dt>Dates</dt>
+        <dd>{span(status.firstGame, status.lastGame)}</dd>
+      </div>
+      <div>
+        <dt>Synced</dt>
+        <dd>{status.syncedAt ? formatWhen(status.syncedAt) : "—"}</dd>
+      </div>
+    </dl>
+  {:else}
+    <p>Nothing cached for {session.season} {session.seasonType}.</p>
+  {/if}
+  <button type="button" onclick={syncCurrent} disabled={session.syncing || !session.ready}>
+    {session.syncing ? "Syncing…" : cached ? "Sync again" : `Sync ${session.season}`}
+  </button>
+</section>
+
+<section>
+  <div class="page-head">
+    <div>
+      <h2>Models</h2>
+      <p>One fit per stat. Open a stat for the test and what the model uses.</p>
+    </div>
+    <button type="button" onclick={train} disabled={!desktop || training || !session.ready || !cached}>
+      {training ? "Training…" : "Refit season"}
+    </button>
+  </div>
+
+  {#if training}
+    <p class="sync-note">Refitting all 14 stats.</p>
+  {/if}
+  {#if stale}
+    <p class="banner">The cache is newer than at least one fit. Refit so the models see the new games.</p>
+  {/if}
+  {#if !desktop}
+    <p class="banner">Fits and the test results are in the desktop app.</p>
+  {/if}
+
+  {#if rows.length > 0}
+    <ul class="cards">
+      {#each rows as row (row.stat)}
+        <li>
+          <a href="/models/{row.stat}">
+            <strong>{row.label}</strong>
+            {#if row.error}
+              <span class="when">{row.fittedAt ? `Fit ${formatWhen(row.fittedAt)}` : "Not fit"}</span>
+              <span class="proof">
+                {row.error.startsWith("No trained model") ? "Open for what this model is." : row.error}
+              </span>
+            {:else}
+              <span class="when">
+                {row.fittedAt ? `Fit ${formatWhen(row.fittedAt)}` : "Fit"}
+                {#if row.fittedAt && status?.syncedAt && row.fittedAt < status.syncedAt}
+                  · cache is newer
+                {/if}
+              </span>
+              <span class="proof">
+                Holdout {number(row.holdoutMae)} · last 10 {number(row.baselineMae)}
+              </span>
+            {/if}
+          </a>
+        </li>
+      {/each}
+    </ul>
+  {:else if desktop && !loadError}
+    <p class="waiting">Reading saved models…</p>
+  {:else}
+    <ul class="cards">
+      {#each session.stats as item (item.id)}
+        <li>
+          <a href="/models/{item.id}">
+            <strong>{item.label}</strong>
+            <span class="when">Not fit</span>
+            <span class="proof">Open for what this model is.</span>
+          </a>
+        </li>
+      {/each}
+    </ul>
+  {/if}
+</section>
+
+<section class="panel">
+  <h2>Player</h2>
+  {#if cached}
+    <p>Open a player for the trend, a line, and the projection.</p>
+    <PlayerSearch {players} selectedId={null} onSelect={openPlayer} />
+  {:else}
+    <p>Sync this season, then pick a player.</p>
+  {/if}
+</section>

@@ -1,0 +1,9 @@
+{
+  "stat": "points_assists_rebounds",
+  "prior_minutes": 240,
+  "opponent_minutes": 1500,
+  "shift_prior": 0.1,
+  "role_minutes": [15, 28],
+  "home_sd": 0.08,
+  "rest_sd": 0.015
+}

@@ -1,0 +1,340 @@
+use std::collections::HashMap;
+use std::time::Duration;
+
+use serde_json::Value;
+use wreq::Client;
+use wreq_util::Emulation;
+
+use crate::error::{AppError, AppResult};
+use crate::models::GameLog;
+
+const GAME_LOGS_URL: &str = "https://stats.nba.com/stats/playergamelogs";
+
+/// stats.nba.com answers a browser TLS fingerprint and returns nothing to a
+/// plain Rust or curl client. wreq sends the Chrome 136 fingerprint that the
+/// endpoint accepts. The NBA headers below are the ones the stats site sends.
+#[derive(Clone)]
+pub struct NbaClient {
+    http: Client,
+}
+
+impl NbaClient {
+    pub fn new() -> AppResult<Self> {
+        let http = Client::builder()
+            .emulation(Emulation::Chrome136)
+            .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(20))
+            .redirect(wreq::redirect::Policy::limited(5))
+            .build()?;
+        Ok(Self { http })
+    }
+
+    pub async fn player_game_logs(&self, season: &str, season_type: &str) -> AppResult<Vec<GameLog>> {
+        let body = self.get_logs(season, season_type).await?;
+        parse_player_game_logs(&body, season, season_type)
+    }
+
+    async fn get_logs(&self, season: &str, season_type: &str) -> AppResult<String> {
+        let params = [
+            ("DateFrom", ""),
+            ("DateTo", ""),
+            ("GameSegment", ""),
+            ("LastNGames", "0"),
+            ("LeagueID", "00"),
+            ("Location", ""),
+            ("MeasureType", "Base"),
+            ("Month", "0"),
+            ("OpponentTeamID", "0"),
+            ("Outcome", ""),
+            ("PORound", "0"),
+            ("PerMode", "Totals"),
+            ("Period", "0"),
+            ("PlayerID", ""),
+            ("Season", season),
+            ("SeasonSegment", ""),
+            ("SeasonType", season_type),
+            ("ShotClockRange", ""),
+            ("TeamID", "0"),
+            ("VsConference", ""),
+            ("VsDivision", ""),
+        ];
+        let mut last_error = None;
+        for attempt in 0..3 {
+            match self.get_once(&params).await {
+                Ok(body) => return Ok(body),
+                Err(error) => {
+                    last_error = Some(error);
+                    tokio::time::sleep(Duration::from_millis(500 * (attempt + 1))).await;
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| AppError::message("the NBA stats request failed")))
+    }
+
+    async fn get_once(&self, params: &[(&str, &str)]) -> AppResult<String> {
+        let response = self
+            .http
+            .get(GAME_LOGS_URL)
+            .header("Accept", "application/json, text/plain, */*")
+            .header("Accept-Language", "en-US,en;q=0.9")
+            .header("Origin", "https://www.nba.com")
+            .header("Referer", "https://www.nba.com/")
+            .header("x-nba-stats-origin", "stats")
+            .header("x-nba-stats-token", "true")
+            .query(params)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(AppError::Nba(format!(
+                "HTTP {status}: {}",
+                snippet(&body)
+            )));
+        }
+        Ok(body)
+    }
+}
+
+pub fn parse_player_game_logs(body: &str, season: &str, season_type: &str) -> AppResult<Vec<GameLog>> {
+    let payload: Value = serde_json::from_str(body)?;
+    let set = payload
+        .get("resultSets")
+        .and_then(|value| value.as_array())
+        .and_then(|sets| sets.first())
+        .ok_or_else(|| AppError::Nba(format!("unexpected stats payload: {}", snippet(body))))?;
+    let headers = set
+        .get("headers")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| AppError::message("the stats payload has no headers"))?;
+    let mut columns = HashMap::new();
+    for (index, header) in headers.iter().enumerate() {
+        if let Some(name) = header.as_str() {
+            columns.entry(name.to_string()).or_insert(index);
+        }
+    }
+    let rows = set
+        .get("rowSet")
+        .and_then(|value| value.as_array())
+        .ok_or_else(|| AppError::message("the stats payload has no rows"))?;
+
+    let mut games = Vec::with_capacity(rows.len());
+    for row in rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        let game_id = game_id_at(row, &columns)?;
+        // 003 is the All-Star game id prefix. It is not a season game.
+        if game_id.starts_with("003") {
+            continue;
+        }
+        let game_date = parse_nba_date(&text_at(row, &columns, "GAME_DATE")?).ok_or_else(|| {
+            AppError::message(format!("could not read a game date in {game_id}"))
+        })?;
+        games.push(GameLog {
+            player_id: number_at(row, &columns, "PLAYER_ID")? as i64,
+            player_name: text_at(row, &columns, "PLAYER_NAME")?,
+            team_abbr: text_at(row, &columns, "TEAM_ABBREVIATION")?,
+            game_id,
+            game_date,
+            matchup: text_at(row, &columns, "MATCHUP")?,
+            wl: text_at(row, &columns, "WL")?,
+            minutes: minutes_at(row, &columns)?,
+            pts: number_at(row, &columns, "PTS")? as i32,
+            reb: number_at(row, &columns, "REB")? as i32,
+            ast: number_at(row, &columns, "AST")? as i32,
+            stl: number_at(row, &columns, "STL")? as i32,
+            blk: number_at(row, &columns, "BLK")? as i32,
+            tov: number_at(row, &columns, "TOV")? as i32,
+            fgm: number_at(row, &columns, "FGM")? as i32,
+            fga: number_at(row, &columns, "FGA")? as i32,
+            fg3m: number_at(row, &columns, "FG3M")? as i32,
+            ftm: number_at(row, &columns, "FTM")? as i32,
+            plus_minus: number_at(row, &columns, "PLUS_MINUS")? as i32,
+        });
+    }
+    let _ = (season, season_type);
+    Ok(games)
+}
+
+fn cell<'a>(
+    row: &'a [Value],
+    columns: &HashMap<String, usize>,
+    name: &str,
+) -> AppResult<&'a Value> {
+    let index = columns
+        .get(name)
+        .copied()
+        .ok_or_else(|| AppError::message(format!("the stats payload is missing {name}")))?;
+    row.get(index)
+        .ok_or_else(|| AppError::message(format!("a stats row is missing {name}")))
+}
+
+fn text_at(row: &[Value], columns: &HashMap<String, usize>, name: &str) -> AppResult<String> {
+    Ok(match cell(row, columns, name)? {
+        Value::String(value) => value.clone(),
+        Value::Number(value) => value.to_string(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    })
+}
+
+fn number_at(row: &[Value], columns: &HashMap<String, usize>, name: &str) -> AppResult<f64> {
+    Ok(match cell(row, columns, name)? {
+        Value::Number(value) => value.as_f64().unwrap_or(0.0),
+        Value::String(value) => parse_number(value),
+        _ => 0.0,
+    })
+}
+
+fn minutes_at(row: &[Value], columns: &HashMap<String, usize>) -> AppResult<f64> {
+    Ok(match cell(row, columns, "MIN")? {
+        Value::Number(value) => value.as_f64().unwrap_or(0.0),
+        Value::String(value) => parse_minutes(value),
+        _ => 0.0,
+    })
+}
+
+pub fn parse_nba_date(raw: &str) -> Option<String> {
+    let value = raw.trim();
+    if value.len() >= 10 && value.as_bytes().get(4) == Some(&b'-') && value.as_bytes().get(7) == Some(&b'-')
+    {
+        return Some(value[..10].to_string());
+    }
+    let cleaned = value.replace(',', " ");
+    let parts: Vec<_> = cleaned.split_whitespace().collect();
+    if parts.len() != 3 {
+        return None;
+    }
+    let month = month_number(parts[0])?;
+    let day: u32 = parts[1].parse().ok()?;
+    let year: i32 = parts[2].parse().ok()?;
+    if !(1..=31).contains(&day) {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn game_id_at(row: &[Value], columns: &HashMap<String, usize>) -> AppResult<String> {
+    Ok(match cell(row, columns, "GAME_ID")? {
+        Value::String(value) => value.clone(),
+        // A numeric id drops the leading zeros. Ten digits puts 002 and 003 back.
+        Value::Number(value) => match value.as_i64() {
+            Some(id) if (0..10_000_000_000).contains(&id) => format!("{id:010}"),
+            _ => value.to_string(),
+        },
+        Value::Null => String::new(),
+        other => other.to_string(),
+    })
+}
+
+fn month_number(name: &str) -> Option<u32> {
+    let lower = name.to_ascii_lowercase();
+    let key = &lower[..lower.len().min(3)];
+    Some(match key {
+        "jan" => 1,
+        "feb" => 2,
+        "mar" => 3,
+        "apr" => 4,
+        "may" => 5,
+        "jun" => 6,
+        "jul" => 7,
+        "aug" => 8,
+        "sep" => 9,
+        "oct" => 10,
+        "nov" => 11,
+        "dec" => 12,
+        _ => return None,
+    })
+}
+
+fn parse_minutes(value: &str) -> f64 {
+    let value = value.trim();
+    if let Some((minutes, seconds)) = value.split_once(':') {
+        let minutes = minutes.parse::<f64>().unwrap_or(0.0);
+        let seconds = seconds.parse::<f64>().unwrap_or(0.0);
+        return minutes + seconds / 60.0;
+    }
+    parse_number(value)
+}
+
+fn parse_number(value: &str) -> f64 {
+    value.trim().parse::<f64>().unwrap_or(0.0)
+}
+
+fn snippet(body: &str) -> String {
+    let compact: String = body.chars().take(180).collect();
+    if compact.is_empty() {
+        "empty response".to_string()
+    } else {
+        compact
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_game_log_and_drops_the_all_star_game() {
+        let body = r#"{
+          "resultSets": [{
+            "name": "PlayerGameLogs",
+            "headers": ["SEASON_YEAR","PLAYER_ID","PLAYER_NAME","TEAM_ABBREVIATION","GAME_ID","GAME_DATE","MATCHUP","WL","MIN","FGM","FGA","FG3M","FTM","REB","AST","TOV","STL","BLK","PTS","PLUS_MINUS"],
+            "rowSet": [
+              ["2025-26", 203999, "Nikola Jokic", "DEN", "0022500001", "2025-10-22T00:00:00", "DEN vs. LAL", "W", 36.5, 10, 18, 2, 7, 12, 11, 3, 1, 1, 29, 8],
+              ["2025-26", 203999, "Nikola Jokic", "DEN", "0032500001", "2025-02-15T00:00:00", "DEN vs. EST", "W", 20, 5, 8, 1, 2, 5, 6, 1, 0, 0, 13, 4],
+              ["2025-26", 201142, "Kevin Durant", "HOU", "0022500002", "Apr 12, 2026", "HOU @ SAS", "L", "32:30", 9, 17, 3, 6, 7, 4, 2, 0, 2, 27, -3]
+            ]
+          }]
+        }"#;
+        let games = parse_player_game_logs(body, "2025-26", "Regular Season").unwrap();
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].player_name, "Nikola Jokic");
+        assert_eq!(games[0].game_date, "2025-10-22");
+        assert_eq!(games[0].minutes, 36.5);
+        assert_eq!(games[1].player_name, "Kevin Durant");
+        assert_eq!(games[1].game_date, "2026-04-12");
+        assert!((games[1].minutes - 32.5).abs() < 0.001);
+        assert_eq!(games[1].plus_minus, -3);
+    }
+
+    #[test]
+    fn numeric_game_ids_keep_the_season_prefix() {
+        let body = r#"{
+          "resultSets": [{
+            "headers": ["SEASON_YEAR","PLAYER_ID","PLAYER_NAME","TEAM_ABBREVIATION","GAME_ID","GAME_DATE","MATCHUP","WL","MIN","FGM","FGA","FG3M","FTM","REB","AST","TOV","STL","BLK","PTS","PLUS_MINUS"],
+            "rowSet": [
+              ["2025-26", 1, "N Sample", "LAB", 22500001, "2025-10-24T00:00:00", "LAB vs. DAL", "W", 30, 8, 16, 2, 4, 6, 5, 2, 1, 0, 22, 3],
+              ["2025-26", 1, "N Sample", "LAB", 32500001, "2026-02-15T00:00:00", "LAB vs. EST", "W", 12, 3, 6, 1, 1, 2, 2, 1, 0, 0, 8, 1]
+            ]
+          }]
+        }"#;
+        let games = parse_player_game_logs(body, "2025-26", "Regular Season").unwrap();
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].game_id, "0022500001");
+    }
+
+    /// Hits stats.nba.com. Run with `cargo test -- --ignored live_regular_season`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_regular_season_has_a_full_slate() {
+        let client = NbaClient::new().expect("chrome client");
+        let games = client
+            .player_game_logs("2025-26", "Regular Season")
+            .await
+            .expect("playergamelogs");
+        assert!(
+            games.len() > 1000,
+            "expected a season of logs, got {}",
+            games.len()
+        );
+        assert!(
+            games.iter().any(|game| game.player_id == 203999),
+            "expected Nikola Jokic (203999) in {} games",
+            games.len()
+        );
+        assert!(games.iter().all(|game| !game.game_id.starts_with("003")));
+        assert!(games.iter().all(|game| game.game_date.len() == 10));
+    }
+}

@@ -1,0 +1,611 @@
+<script lang="ts">
+  import { goto } from "$app/navigation";
+  import { page } from "$app/stores";
+  import Distribution from "$lib/components/Distribution.svelte";
+  import PlayerSearch from "$lib/components/PlayerSearch.svelte";
+  import Prediction from "$lib/components/Prediction.svelte";
+  import TrendChart from "$lib/components/TrendChart.svelte";
+  import { errorText, loadPlayers, loadTrend } from "$lib/api";
+  import { wilson } from "$lib/deskMath";
+  import { downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
+  import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
+  import type { PlayerOption, Prediction as Projection, TrendGame, TrendReport } from "$lib/types";
+
+  const SHORT: Record<string, string> = {
+    points: "PTS",
+    rebounds: "REB",
+    assists: "AST",
+    steals: "STL",
+    blocks: "BLK",
+    turnovers: "TOV",
+    three_point_field_goals_made: "3PM",
+    field_goals_made: "FGM",
+    field_goals_attempted: "FGA",
+    free_throws_made: "FTM",
+    points_assists: "P+A",
+    points_rebounds: "P+R",
+    assists_rebounds: "R+A",
+    points_assists_rebounds: "PRA",
+  };
+
+  const WINDOW_SHORT: Record<string, string> = {
+    last_5: "L5",
+    last_10: "L10",
+    last_20: "L20",
+    season: "Season",
+  };
+
+  const STAT_ORDER = [
+    "points",
+    "rebounds",
+    "assists",
+    "three_point_field_goals_made",
+    "points_assists_rebounds",
+    "points_rebounds",
+    "points_assists",
+    "assists_rebounds",
+    "steals",
+    "blocks",
+    "turnovers",
+    "field_goals_made",
+    "field_goals_attempted",
+    "free_throws_made",
+  ];
+
+  const BOX: { key: keyof TrendGame; label: string; stat: string }[] = [
+    { key: "points", label: "PTS", stat: "points" },
+    { key: "rebounds", label: "REB", stat: "rebounds" },
+    { key: "assists", label: "AST", stat: "assists" },
+    { key: "steals", label: "STL", stat: "steals" },
+    { key: "blocks", label: "BLK", stat: "blocks" },
+    { key: "turnovers", label: "TOV", stat: "turnovers" },
+  ];
+
+  let players = $state<PlayerOption[]>([]);
+  let playerId = $state<number | null>(null);
+  let stat = $state("points");
+  let windowId = $state("last_10");
+  let line = $state(20);
+  let lineHeld = $state(false);
+  let report = $state<TrendReport | null>(null);
+  let projection = $state<Projection | null>(null);
+  let loading = $state(false);
+  let deskError = $state<string | null>(null);
+  let appliedUrl = $state("");
+  let appliedMedian = $state("");
+  let requestId = 0;
+  let seasonRequest = 0;
+  let seasonGames = $state<TrendGame[]>([]);
+  let seasonKey = $state("");
+  let opponent = $state("");
+  let site = $state("home");
+  let rest = $state(1);
+  let minutesText = $state("");
+  let minutesFor = $state("");
+
+  let synced = $derived((currentStatus()?.games ?? 0) > 0);
+  let mark = $derived(Number.isFinite(line) ? line : 0);
+  let home = $derived(site === "home");
+  let teams = $derived(
+    [...new Set(players.map((player) => player.team).filter((team) => team.length > 0))].sort(
+      (left, right) => left.localeCompare(right),
+    ),
+  );
+  let minutesValue = $derived.by((): number | null | "bad" => {
+    const text = minutesText.trim();
+    if (!text) return null;
+    const value = Number(text);
+    if (!Number.isFinite(value) || value < 0 || value > 60) return "bad";
+    return value;
+  });
+  let spotError = $derived(
+    minutesValue === "bad"
+      ? "Minutes have to be a number from 0 to 60."
+      : !Number.isFinite(rest) || rest < 0
+        ? "Rest has to be a number that is zero or greater."
+        : null,
+  );
+
+  $effect(() => {
+    if (opponent && !teams.includes(opponent)) opponent = "";
+  });
+
+  $effect(() => {
+    const playerKey = `${session.season}|${session.seasonType}|${playerId}`;
+    if (minutesFor === playerKey) return;
+    minutesFor = playerKey;
+    minutesText = "";
+  });
+
+  $effect(() => {
+    if (!session.ready) return;
+    const games = currentStatus()?.games ?? 0;
+    const nextSeason = session.season;
+    const nextType = session.seasonType;
+    if (games === 0) {
+      players = [];
+      return;
+    }
+    loadPlayers(nextSeason, nextType)
+      .then((rows) => {
+        if (nextSeason !== session.season || nextType !== session.seasonType) return;
+        if ((currentStatus()?.games ?? 0) === 0) return;
+        players = rows;
+      })
+      .catch((caught: unknown) => {
+        deskError = errorText(caught);
+      });
+  });
+
+  $effect(() => {
+    if (!players.length) return;
+    const urlKey = $page.url.search;
+    if (appliedUrl === urlKey) return;
+    appliedUrl = urlKey;
+    const params = $page.url.searchParams;
+    const requestedStat = params.get("stat");
+    const requestedWindow = params.get("window");
+    const requestedPlayer = Number(params.get("player"));
+    if (requestedStat && session.stats.some((item) => item.id === requestedStat)) {
+      stat = requestedStat;
+      lineHeld = false;
+    }
+    if (requestedWindow && session.windows.some((item) => item.id === requestedWindow)) {
+      windowId = requestedWindow;
+    }
+    if (players.some((player) => player.playerId === requestedPlayer)) {
+      playerId = requestedPlayer;
+      lineHeld = false;
+    }
+    const requestedLine = Number(params.get("line"));
+    if (params.has("line") && Number.isFinite(requestedLine) && requestedLine >= 0) {
+      line = requestedLine;
+      lineHeld = true;
+    }
+  });
+
+  $effect(() => {
+    if (!players.length) {
+      playerId = null;
+      return;
+    }
+    if (playerId != null && !players.some((player) => player.playerId === playerId)) {
+      playerId = null;
+    }
+  });
+
+  $effect(() => {
+    if (!session.ready || playerId == null || !synced) {
+      seasonGames = [];
+      seasonKey = "";
+      return;
+    }
+    const nextSeason = session.season;
+    const nextType = session.seasonType;
+    const nextPlayer = playerId;
+    const nextStat = stat;
+    const key = `${nextSeason}|${nextType}|${nextPlayer}|${nextStat}`;
+    const id = ++seasonRequest;
+    loadTrend({
+      season: nextSeason,
+      seasonType: nextType,
+      playerId: nextPlayer,
+      stat: nextStat,
+      window: "season",
+      line: 0,
+    })
+      .then((next) => {
+        if (id !== seasonRequest) return;
+        seasonKey = key;
+        seasonGames = next.games;
+      })
+      .catch((caught: unknown) => {
+        if (id !== seasonRequest) return;
+        seasonGames = [];
+        seasonKey = "";
+        deskError = errorText(caught);
+      });
+  });
+
+  $effect(() => {
+    if (!session.ready || playerId == null || !synced) return;
+    const medianKey = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
+    const held = lineHeld;
+    const currentLine = Number.isFinite(line) ? line : 0;
+    const id = ++requestId;
+    loading = true;
+    deskError = null;
+    loadTrend({
+      season: session.season,
+      seasonType: session.seasonType,
+      playerId,
+      stat,
+      window: windowId,
+      line: currentLine,
+    })
+      .then((next) => {
+        if (id !== requestId) return;
+        if (!held && appliedMedian !== medianKey && next.summary.median != null) {
+          appliedMedian = medianKey;
+          const suggested = round1(next.summary.median);
+          if (suggested !== currentLine) {
+            line = suggested;
+            return;
+          }
+        }
+        appliedMedian = medianKey;
+        report = next;
+      })
+      .catch((caught: unknown) => {
+        if (id !== requestId) return;
+        report = null;
+        deskError = errorText(caught);
+      })
+      .finally(() => {
+        if (id === requestId) loading = false;
+      });
+  });
+
+  function selectPlayer(id: number) {
+    playerId = id;
+    lineHeld = false;
+    const url = new URL(window.location.href);
+    url.searchParams.set("player", String(id));
+    url.searchParams.set("stat", stat);
+    url.searchParams.set("window", windowId);
+    void goto(`${url.pathname}${url.search}`, { replaceState: true, keepFocus: true, noScroll: true });
+  }
+
+  function useMedian() {
+    if (report?.summary.median == null) return;
+    lineHeld = true;
+    line = round1(report.summary.median);
+  }
+
+  function shortStat(id: string, label: string): string {
+    return SHORT[id] ?? label;
+  }
+
+  function signed(value: number, against: number): string {
+    const delta = round1(value - against);
+    if (delta === 0) return "0";
+    const body = Number.isInteger(delta) ? String(Math.abs(delta)) : Math.abs(delta).toFixed(1);
+    return delta > 0 ? `+${body}` : `−${body}`;
+  }
+
+  let orderedStats = $derived(
+    [...session.stats].sort(
+      (left, right) => STAT_ORDER.indexOf(left.id) - STAT_ORDER.indexOf(right.id),
+    ),
+  );
+
+  let splits = $derived.by(() => {
+    const key = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
+    const source = seasonKey === key ? seasonGames : [];
+    return session.windows.map((item) => {
+      const size = item.id === "last_5" ? 5 : item.id === "last_10" ? 10 : item.id === "last_20" ? 20 : null;
+      const games = size == null || source.length <= size ? source : source.slice(-size);
+      const sample = games.length;
+      const overs = games.filter((game) => game.stat >= mark).length;
+      return {
+        id: item.id,
+        short: WINDOW_SHORT[item.id] ?? item.label,
+        overs,
+        sample,
+        rate: sample ? overs / sample : null,
+      };
+    });
+  });
+
+  let activeSplit = $derived(splits.find((item) => item.id === windowId) ?? null);
+  let activeBand = $derived(
+    activeSplit && activeSplit.sample > 0 ? wilson(activeSplit.overs, activeSplit.sample) : null,
+  );
+
+  function dayNumber(iso: string): number {
+    const [year, month, day] = iso.split("-").map(Number);
+    return Math.floor(Date.UTC(year, month - 1, day) / 86400000);
+  }
+
+  let restGap = $derived.by(() => {
+    const key = `${session.season}|${session.seasonType}|${playerId}|${stat}`;
+    const source = seasonKey === key ? seasonGames : [];
+    const gaps = new Map<string, number | null>();
+    let previous: string | null = null;
+    for (const game of source) {
+      gaps.set(
+        game.gameId,
+        previous == null ? null : dayNumber(game.gameDate) - dayNumber(previous) - 1,
+      );
+      previous = game.gameDate;
+    }
+    return gaps;
+  });
+
+  let cuts = $derived.by(() => {
+    if (!report) return [];
+    const games = report.games;
+    const count = (picked: typeof games) => ({
+      overs: picked.filter((game) => game.over).length,
+      sample: picked.length,
+    });
+    const restReady = seasonKey === `${session.season}|${session.seasonType}|${playerId}|${stat}`;
+    const rows = [
+      { label: "Home", ...count(games.filter((game) => game.location === "home")) },
+      { label: "Away", ...count(games.filter((game) => game.location === "away")) },
+    ];
+    if (restReady) {
+      rows.push(
+        { label: "Back-to-back", ...count(games.filter((game) => restGap.get(game.gameId) === 0)) },
+        {
+          label: "Rested",
+          ...count(games.filter((game) => (restGap.get(game.gameId) ?? 1) > 0)),
+        },
+      );
+    }
+    return rows;
+  });
+</script>
+
+{#if !synced}
+  <section class="empty">
+    <h2>No games cached for {session.season}.</h2>
+    <p>Sync pulls every player game log for this season type onto this machine.</p>
+    <button type="button" onclick={syncCurrent} disabled={session.syncing}>
+      {session.syncing ? "Syncing…" : `Sync ${session.season}`}
+    </button>
+  </section>
+{:else}
+  <form class="controls" onsubmit={(event) => event.preventDefault()}>
+    <PlayerSearch {players} selectedId={playerId} onSelect={selectPlayer} />
+    {#if playerId != null}
+      {#if report}
+        <header class="identity">
+          <div>
+            <p class="team">{report.team}</p>
+            <h1>{report.playerName}</h1>
+          </div>
+        </header>
+      {/if}
+      <div class="chips" role="group" aria-label="Stat">
+        {#each orderedStats as item (item.id)}
+          <button
+            type="button"
+            class="chip"
+            class:on={stat === item.id}
+            onclick={() => {
+              stat = item.id;
+              lineHeld = false;
+            }}
+          >
+            {shortStat(item.id, item.label)}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </form>
+
+  {#if playerId != null}
+    <section class="number-room" aria-label="The number being checked">
+      <p class="kicker">The number</p>
+      <label class="number-edit">
+        <input
+          type="number"
+          min="0"
+          step="0.5"
+          aria-label="The number to check"
+          bind:value={line}
+          oninput={() => {
+            lineHeld = true;
+          }}
+        />
+        <span class="number-unit">{(report?.statLabel ?? "points").toLowerCase()}</span>
+      </label>
+      <p class="number-help">
+        Both cards below check this many {(report?.statLabel ?? "points").toLowerCase()} or more.
+      </p>
+      <div class="number-actions">
+        <button type="button" class="ghost" onclick={useMedian}>Use the median</button>
+        <button type="button" class="ghost" disabled={!report} onclick={() => report && downloadCsv(report)}>
+          CSV
+        </button>
+      </div>
+    </section>
+  {/if}
+
+  {#if deskError}
+    <p class="banner bad">{deskError}</p>
+  {/if}
+
+  {#if report}
+    <div class="rooms">
+    <section class="room model-room">
+      <header>
+        <p class="kicker">Model</p>
+        <h2>What the model expects for this game</h2>
+      </header>
+      <div class="fields">
+        <label>
+          Opponent
+          <select bind:value={opponent}>
+            <option value="">Average opponent</option>
+            {#each teams as team (team)}
+              <option value={team}>{team}</option>
+            {/each}
+          </select>
+        </label>
+        <label>
+          Home or away
+          <select bind:value={site}>
+            <option value="home">Home</option>
+            <option value="away">Away</option>
+          </select>
+        </label>
+        <label>
+          Days of rest
+          <input type="number" min="0" max="14" step="1" bind:value={rest} />
+        </label>
+        <label>
+          Minutes
+          <input
+            type="number"
+            min="0"
+            max="60"
+            step="0.1"
+            placeholder="Last 10"
+            value={minutesText}
+            oninput={(event) => {
+              minutesText = event.currentTarget.value;
+            }}
+          />
+        </label>
+      </div>
+      <Prediction
+        {playerId}
+        {stat}
+        line={mark}
+        season={session.season}
+        seasonType={session.seasonType}
+        {opponent}
+        {home}
+        restDays={rest}
+        minutes={minutesValue === "bad" ? null : minutesValue}
+        {windowId}
+        {spotError}
+        trendMean={report.summary.mean}
+        windowLabel={report.windowLabel}
+        onprojection={(value) => {
+          projection = value;
+        }}
+      />
+      <Distribution
+        games={report.games}
+        line={mark}
+        trendMean={report.summary.mean}
+        windowLabel={report.windowLabel}
+        statLabel={report.statLabel}
+        mean={projection?.mean ?? null}
+        pmf={projection?.pmf ?? null}
+      />
+    </section>
+
+    <section class="room trend-room">
+      <header>
+        <p class="kicker">Trend</p>
+        <h2>How often the games were {formatLine(mark)} {(report.statLabel).toLowerCase()} or more</h2>
+      </header>
+    <div class="splits" role="group" aria-label="How often the games reached the number">
+      {#each splits as item (item.id)}
+        <button
+          type="button"
+          class="split"
+          class:on={windowId === item.id}
+          aria-pressed={windowId === item.id}
+          onclick={() => {
+            windowId = item.id;
+          }}
+        >
+          <span class="k">{item.short}</span>
+          <strong>{item.rate == null ? "—" : `${(item.rate * 100).toFixed(0)}%`}</strong>
+          <em>{item.sample ? `${item.overs}/${item.sample}` : "—"}</em>
+        </button>
+      {/each}
+    </div>
+
+    {#if activeSplit && activeSplit.sample > 0}
+      <p class="band">
+        {activeSplit.overs} of {activeSplit.sample} were {formatLine(mark)} or more.
+        {#if activeBand}
+          A 95% interval on that rate is {(activeBand.low * 100).toFixed(0)}–{(activeBand.high * 100).toFixed(0)}%.
+        {/if}
+        {#if activeSplit.sample < 30}
+          {activeSplit.sample} games is a small sample, so that interval is wide.
+        {/if}
+      </p>
+    {/if}
+
+    {#if cuts.length > 0}
+      <p class="cuts">
+        {#each cuts as cut (cut.label)}
+          <span>{cut.label} <b>{cut.sample ? `${cut.overs}/${cut.sample}` : "—"}</b></span>
+        {/each}
+      </p>
+    {/if}
+
+    <section class="panel">
+      <h2>{report.windowLabel}, and whether each was {formatLine(report.line)} or more</h2>
+      <TrendChart
+        games={report.games}
+        line={report.line}
+        label={`${report.playerName}, ${report.summary.overs} of ${report.summary.sample} cleared ${formatLine(report.line)} ${report.statLabel}`}
+      />
+      <p class="legend">
+        <span class="key"><i class="swatch over"></i> {formatLine(report.line)} or more</span>
+        <span class="key"><i class="swatch under"></i> Under {formatLine(report.line)}</span>
+        <span class="key"><i class="swatch avg"></i> Last 3</span>
+        <span class="key"><i class="swatch line"></i> At least {formatLine(report.line)}</span>
+      </p>
+      <dl class="strip">
+        <div><dt>Mean</dt><dd>{formatStat(report.summary.mean)}</dd></div>
+        <div><dt>Median</dt><dd>{formatStat(report.summary.median)}</dd></div>
+        <div><dt>SD</dt><dd>{formatStat(report.summary.sd)}</dd></div>
+        <div><dt>Min</dt><dd>{formatStat(report.summary.min, 0)}</dd></div>
+        <div><dt>Max</dt><dd>{formatStat(report.summary.max, 0)}</dd></div>
+      </dl>
+    </section>
+
+    <ol class="results" aria-label="Games in this window, oldest first">
+      {#each report.games as game (game.gameId)}
+        <li class={game.over ? "over" : "under"}>
+          <span class="when">{shortDate(game.gameDate)}</span>
+          <strong>{formatStat(game.stat, Number.isInteger(game.stat) ? 0 : 1)}</strong>
+          <span class="opp">{game.location === "away" ? "@" : ""}{game.opponent}</span>
+        </li>
+      {/each}
+    </ol>
+
+    <div class="table-wrap">
+      <table>
+        <caption>Newest first.</caption>
+        <thead>
+          <tr>
+            <th class="left">Date</th>
+            <th class="left">Opp</th>
+            <th>Min</th>
+            <th>{shortStat(report.stat, report.statLabel)}</th>
+            <th>vs {formatLine(report.line)}</th>
+            {#each BOX as column (column.key)}
+              {#if column.stat !== report.stat}
+                <th>{column.label}</th>
+              {/if}
+            {/each}
+            <th>+/−</th>
+          </tr>
+        </thead>
+        <tbody>
+          {#each [...report.games].reverse() as game (game.gameId)}
+            <tr>
+              <td class="left">{shortDate(game.gameDate)}</td>
+              <td class="left">{game.location === "away" ? "@" : ""}{game.opponent}</td>
+              <td>{game.minutes.toFixed(1)}</td>
+              <td class="stat">{formatStat(game.stat, Number.isInteger(game.stat) ? 0 : 1)}</td>
+              <td class="mark {game.over ? 'over' : 'under'}">{signed(game.stat, report.line)}</td>
+              {#each BOX as column (column.key)}
+                {#if column.stat !== report.stat}
+                  <td>{game[column.key]}</td>
+                {/if}
+              {/each}
+              <td>{game.plusMinus}</td>
+            </tr>
+          {/each}
+        </tbody>
+      </table>
+    </div>
+    </section>
+    </div>
+  {:else if playerId == null}
+    <p class="waiting">Pick a player.</p>
+  {:else if loading || players.length === 0}
+    <p class="waiting">{players.length === 0 ? "Loading the roster…" : "Counting the window…"}</p>
+  {/if}
+{/if}
