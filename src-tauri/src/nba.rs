@@ -6,7 +6,7 @@ use wreq::Client;
 use wreq_util::Emulation;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{GameLog, RosterEntry};
+use crate::models::{GameLog, PlayoffSeriesGame, RosterEntry};
 
 /// stats.nba.com team ids to the abbreviations game logs use.
 const TEAM_ABBR: &[(i64, &str)] = &[
@@ -47,6 +47,7 @@ const GAME_LOGS_URL: &str = "https://stats.nba.com/stats/playergamelogs";
 const ROSTER_URL: &str = "https://stats.nba.com/stats/commonallplayers";
 /// Standings with clinch / play-in flags. `playoffpicture` returns HTML now.
 const STANDINGS_URL: &str = "https://stats.nba.com/stats/leaguestandingsv3";
+const PLAYOFF_SERIES_URL: &str = "https://stats.nba.com/stats/commonplayoffseries";
 
 /// stats.nba.com answers a browser TLS fingerprint and returns nothing to a
 /// plain Rust or curl client. wreq sends the Chrome 136 fingerprint that the
@@ -93,6 +94,13 @@ impl NbaClient {
         ];
         let body = self.get_with_retries(STANDINGS_URL, &params).await?;
         parse_playoff_teams(&body)
+    }
+
+    /// Scheduled games in every playoff series for `season`. Used to spot a 4-loss elimination.
+    pub async fn playoff_series(&self, season: &str) -> AppResult<Vec<PlayoffSeriesGame>> {
+        let params = [("LeagueID", "00"), ("Season", season)];
+        let body = self.get_with_retries(PLAYOFF_SERIES_URL, &params).await?;
+        parse_playoff_series(&body)
     }
 
     async fn get_logs(&self, season: &str, season_type: &str) -> AppResult<String> {
@@ -207,7 +215,31 @@ pub fn parse_playoff_teams(body: &str) -> AppResult<Vec<String>> {
     Ok(teams)
 }
 
-fn team_abbr(team_id: i64) -> Option<&'static str> {
+/// Reads `commonplayoffseries`. Team ids become the abbreviations game logs use.
+pub fn parse_playoff_series(body: &str) -> AppResult<Vec<PlayoffSeriesGame>> {
+    let (columns, rows) = result_set(body)?;
+    let mut games = Vec::with_capacity(rows.len());
+    for row in &rows {
+        let Some(row) = row.as_array() else {
+            continue;
+        };
+        let home_id = number_at(row, &columns, "HOME_TEAM_ID")? as i64;
+        let visitor_id = number_at(row, &columns, "VISITOR_TEAM_ID")? as i64;
+        let (Some(home), Some(visitor)) = (team_abbr(home_id), team_abbr(visitor_id)) else {
+            continue;
+        };
+        games.push(PlayoffSeriesGame {
+            game_id: text_at(row, &columns, "GAME_ID")?,
+            series_id: text_at(row, &columns, "SERIES_ID")?,
+            home_team: home.to_string(),
+            visitor_team: visitor.to_string(),
+            game_num: number_at(row, &columns, "GAME_NUM")? as i32,
+        });
+    }
+    Ok(games)
+}
+
+pub(crate) fn team_abbr(team_id: i64) -> Option<&'static str> {
     TEAM_ABBR.iter().find(|(id, _)| *id == team_id).map(|(_, abbr)| *abbr)
 }
 
@@ -505,7 +537,48 @@ mod tests {
     }
 
     #[test]
+    fn playoff_series_parse_maps_team_ids() {
+        let body = concat!(
+            r#"{"resultSets":[{"headers":["GAME_ID","HOME_TEAM_ID","VISITOR_TEAM_ID","SERIES_ID","GAME_NUM"],"rowSet":["#,
+            r#"["0042500101",1610612765,1610612753,"004250010",1],"#,
+            r#"["0042500102",1610612765,1610612753,"004250010",2]"#,
+            r#"]}]}"#
+        );
+        let games = parse_playoff_series(body).unwrap();
+        assert_eq!(games.len(), 2);
+        assert_eq!(games[0].home_team, "DET");
+        assert_eq!(games[0].visitor_team, "ORL");
+        assert_eq!(games[0].series_id, "004250010");
+    }
+
+    /// Hits stats.nba.com. Run with `cargo test live_playoff_series -- --ignored`.
+    #[tokio::test]
+    #[ignore]
+    async fn live_playoff_series_covers_the_bracket() {
+        let client = NbaClient::new().expect("chrome client");
+        for season in ["2024-25", "2025-26"] {
+            let games = client.playoff_series(season).await.expect(season);
+            let series: std::collections::BTreeSet<_> =
+                games.iter().map(|game| game.series_id.clone()).collect();
+            let teams: std::collections::BTreeSet<_> = games
+                .iter()
+                .flat_map(|game| [game.home_team.clone(), game.visitor_team.clone()])
+                .collect();
+            eprintln!(
+                "{season}: {} games, {} series, {} teams {:?}",
+                games.len(),
+                series.len(),
+                teams.len(),
+                teams
+            );
+            assert!(games.len() >= 60, "{} games", games.len());
+            assert_eq!(teams.len(), 16, "{teams:?}");
+        }
+    }
+
+    #[test]
     fn playoff_teams_parse_clinch_and_play_in() {
+
         let body = r#"{"resultSets":[{"headers":["TeamID","ClinchedPostSeason","ClinchedPlayIn"],"rowSet":[
             [1610612760,1,0],
             [1610612758,0,1],
