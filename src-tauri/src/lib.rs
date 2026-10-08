@@ -22,6 +22,19 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
     commands::sync_cached(db_path, season, season_type)
 }
 
+/// Scores the first `last_game` team games of `season` with each (carry, opponent carry) arm,
+/// seeded from `seed_season`'s regular season. Returns markdown tables.
+pub fn backtest_prior(
+    db_path: &Path,
+    season: &str,
+    seed_season: &str,
+    stats: &[String],
+    arms: &[(f64, f64)],
+    last_game: usize,
+) -> Result<String, String> {
+    commands::backtest_prior(db_path, season, seed_season, stats, arms, last_game)
+}
+
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())

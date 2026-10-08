@@ -555,6 +555,47 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
     })
 }
 
+pub fn backtest_prior(
+    db_path: &Path,
+    season: &str,
+    seed_season: &str,
+    stats: &[String],
+    arms: &[(f64, f64)],
+    last_game: usize,
+) -> Result<String, String> {
+    let directory = db_path.parent().unwrap_or_else(|| Path::new("."));
+    let connection = db::open(db_path).map_err(show)?;
+    let regular = season::SEASON_TYPES[0];
+    let season = season::validate_season(season).map_err(show)?;
+    let seed_season = season::validate_season(seed_season).map_err(show)?;
+    let games = db::season_games(&connection, &season, regular).map_err(show)?;
+    let seed = db::season_games(&connection, &seed_season, regular).map_err(show)?;
+    if games.is_empty() || seed.is_empty() {
+        return Err(format!(
+            "Sync {season} and {seed_season} {regular} into this database first."
+        ));
+    }
+    let arms: Vec<engine::backtest::Arm> = arms
+        .iter()
+        .map(|(carry, opponent)| engine::backtest::Arm {
+            carry_minutes: *carry,
+            opponent_carry_minutes: *opponent,
+        })
+        .collect();
+    let mut text = format!(
+        "## {season} seeded from {seed_season}, team games 1-{last_game}\n\n"
+    );
+    for id in stats {
+        let stat = Stat::parse(id).ok_or_else(|| format!("'{id}' is not a stat this desk tracks."))?;
+        let spec = engine::load_spec(stat.id(), &engine::spec_dirs(directory)).map_err(show)?;
+        eprintln!("backtesting {}...", stat.id());
+        let scores = engine::backtest::run(&games, &seed, stat, &spec, &arms, last_game).map_err(show)?;
+        text.push_str(&engine::backtest::report(stat, &arms, &scores));
+        text.push('\n');
+    }
+    Ok(text)
+}
+
 pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<SyncReport, String> {
     let season = season::validate_season(season).map_err(show)?;
     let season_type = season::validate_season_type(season_type).map_err(show)?;

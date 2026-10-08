@@ -14,6 +14,8 @@ use crate::stats::split_matchup;
 use super::bayes::{self, at_least, band, convolve, mean, minute_nodes, scale_mix, std_dev};
 use super::spec::{validate, ModelSpec};
 
+pub mod backtest;
+
 /// The spot the user names. There is no schedule, so nothing here is "tomorrow".
 #[derive(Debug, Clone)]
 pub struct Spot {
