@@ -1,10 +1,24 @@
 # Plan: player-prop odds feed (The Odds API)
 
 **Status:** plan only — no implementation in this PR.  
-**App:** open-prop (Tauri 2 + SvelteKit, no backend/daemon). Main at `6daa2db` when this was written.  
+**App:** open-prop (Tauri 2 + SvelteKit, no backend/daemon). Main at `6daa2db` when drafted; decisions below from Adam on PR #7.  
 **Provider:** [The Odds API](https://the-odds-api.com/) v4.
 
-This plan fits odds into a desktop app that only pulls when it opens or the user asks. There is no always-on scraper. Line “history” is whatever snapshots the app happened to store.
+Odds are pulled when the app opens, the user refreshes, or (optional) a user-chosen poll interval fires **while the app is open**. There is no daemon. Line history is whatever snapshots the app stored under `pulled_at`.
+
+---
+
+## Decisions locked (Adam, PR #7)
+
+| # | Decision |
+|---|---|
+| Plan | Design for **$59 / 100K credits/mo** |
+| Markets | Ship **all documented** mappings; Settings toggles per market; live credit estimate |
+| Regions | **`us`, `us2`, `us_dfs`, `us_ex`** (verified keys — not `us_exc`); Settings toggles per region |
+| FGA | Show **no odds** (no documented market key) |
+| API key | Settings page → file in Tauri app data dir, mode **0600**, masked UI; **no** OS keychain |
+| Refresh | Manual default; optional recurring poll with min interval, credit guard, app-open only |
+| Games | **Pregame only** — drop events with `commence_time` ≤ now |
 
 ---
 
@@ -12,167 +26,218 @@ This plan fits odds into a desktop app that only pulls when it opens or the user
 
 | Topic | URL |
 |---|---|
-| v4 API guide (sports, odds, events, event odds, scores, historical, headers, costs) | https://the-odds-api.com/liveapi/guides/v4/ |
-| Betting market keys (NBA player props + alternates) | https://the-odds-api.com/sports-odds-data/betting-markets.html |
-| NBA sport guide (sport key, event-odds examples) | https://the-odds-api.com/sports/nba-odds.html |
-| Bookmakers by region (`us`, `us2`, `uk`, `eu`, `au`, …) | https://the-odds-api.com/sports-odds-data/bookmaker-apis.html |
+| v4 API guide | https://the-odds-api.com/liveapi/guides/v4/ |
+| Betting market keys (NBA props + alternates) | https://the-odds-api.com/sports-odds-data/betting-markets.html |
+| NBA sport guide | https://the-odds-api.com/sports/nba-odds.html |
+| Bookmakers by region | https://the-odds-api.com/sports-odds-data/bookmaker-apis.html |
 | Update intervals | https://the-odds-api.com/sports-odds-data/update-intervals.html |
 | Historical overview | https://the-odds-api.com/historical-odds-data/ |
-| FAQs (billing, credit reset) | https://the-odds-api.com/manage/faqs.html |
-| Homepage pricing tiers (extracted 2026-10-08) | https://the-odds-api.com/ |
-| open-prop stat catalog | `src/lib/catalog.json` |
+| FAQs (billing, credit reset on 1st of month) | https://the-odds-api.com/manage/faqs.html |
+| Homepage pricing | https://the-odds-api.com/ |
+| open-prop catalog | `src/lib/catalog.json` |
 
-**Not documented (call out, do not guess):** exact overage behavior beyond rate-limit `429`; whether every US book always returns every NBA prop key; a market key for **field goals attempted** (FGA). Homepage FAQ answers for “How frequently are odds updated?” and “How do I upgrade…” defer to other pages (linked above).
+**Still not documented:** exact body/status when monthly quota is exhausted (beyond `429` rate limit); whether every book in a region always returns every NBA prop; a market key for **FGA**.
 
 ---
 
-## 2. API surface we will use
+## 2. API surface
 
-**Host:** `https://api.the-odds-api.com` ([docs](https://the-odds-api.com/liveapi/guides/v4/)).
+**Host:** `https://api.the-odds-api.com`.
 
-| Call | Path | Cost (documented) | Role in open-prop |
+| Call | Path | Cost (documented) | Role |
 |---|---|---|---|
-| Sports | `GET /v4/sports` | **0** | Optional sanity check; NBA key is `basketball_nba` |
-| Events | `GET /v4/sports/{sport}/events` | **0** | Today’s / upcoming NBA slate (ids, teams, `commence_time`) |
-| Event odds | `GET /v4/sports/{sport}/events/{eventId}/odds` | **markets_returned × regions** | Player props per game |
-| Event markets | `GET .../events/{eventId}/markets` | **1** | Optional discovery of which props a book opened |
-| Featured odds | `GET /v4/sports/{sport}/odds` | markets × regions | **Not** for props (h2h/spreads/totals only); skip for MVP |
-| Historical event odds | `GET /v4/historical/sports/{sport}/events/{eventId}/odds` | **10 × markets_returned × regions** | Paid plans only; too expensive for routine line charts — prefer local snapshots |
-| Historical events | `GET /v4/historical/sports/{sport}/events` | **1** (0 if empty) | Only if we ever backfill |
+| Events | `GET /v4/sports/basketball_nba/events` | **0** | Slate ids / teams / `commence_time` |
+| Event odds | `GET /v4/sports/basketball_nba/events/{eventId}/odds` | **markets_returned × regions** | Player props |
+| Event markets | `GET .../events/{eventId}/markets` | **1** | Optional discovery |
+| Historical event odds | `GET /v4/historical/.../events/{eventId}/odds` | **10 × markets_returned × regions** | Avoid for routine history |
 
-**Response headers (every call):** `x-requests-remaining`, `x-requests-used`, `x-requests-last` ([docs](https://the-odds-api.com/liveapi/guides/v4/)).
+**Headers:** `x-requests-remaining`, `x-requests-used`, `x-requests-last`.
 
-**Event-odds outcome shape (player props):** for each bookmaker market, outcomes include `name` (`Over` / `Under`), `description` (player display name), `price`, `point` (line). Example in the [v4 guide](https://the-odds-api.com/liveapi/guides/v4/#get-event-odds) and [NBA page](https://the-odds-api.com/sports/nba-odds.html).
+**Outcome shape:** `name` (Over/Under), `description` (player), `price`, `point`.
 
-**Regions:** start with `us` (DraftKings, FanDuel, BetMGM, …). `us2` is a second region and **doubles** credit cost if both are requested. EU includes Pinnacle but player-prop coverage is documented as mainly US sports / US books ([markets page](https://the-odds-api.com/sports-odds-data/betting-markets.html)).
+**Pregame filter:** after fetching events (and again before each odds call), **exclude** any event with `commence_time <= now` (UTC compare). Do not request odds for in-play games. If a game tips during a poll cycle, skip it on the next tick.
 
-**Update cadence (provider-side):** additional markets (player props) refresh about **60s** pre-match and in-play ([update intervals](https://the-odds-api.com/sports-odds-data/update-intervals.html)). That is the floor on freshness; our TTL will be coarser to save credits.
-
-**Quota reset:** “Usage credits are automatically reset on the first of every month.” ([FAQs](https://the-odds-api.com/manage/faqs.html)).
-
-**Rate limit:** HTTP **429** — space retries over several seconds ([v4 guide](https://the-odds-api.com/liveapi/guides/v4/#rate-limiting-status-code-429)).
+**Provider update floor:** player props ~**60s** ([update intervals](https://the-odds-api.com/sports-odds-data/update-intervals.html)). Poll minimum in Settings should be **≥ 60s** (recommend default **5 minutes**, minimum **2 minutes** so we do not burn quota faster than the feed moves).
 
 ---
 
-## 3. Market map: open-prop stats → Odds API keys
+## 3. Verified region keys
 
-From [`src/lib/catalog.json`](../src/lib/catalog.json) (14 stats) and [NBA player props](https://the-odds-api.com/sports-odds-data/betting-markets.html#nba-ncaab-wnba-player-props-api):
+From [bookmaker APIs](https://the-odds-api.com/sports-odds-data/bookmaker-apis.html). Adam’s `us_exc` is **`us_ex`** in the docs.
 
-| open-prop `id` | Odds API market key | Notes |
+| Region key | Kind | Example bookmaker keys (not exhaustive) |
 |---|---|---|
-| `points` | `player_points` | Main line |
-| `rebounds` | `player_rebounds` | |
-| `assists` | `player_assists` | |
-| `three_point_field_goals_made` | `player_threes` | |
-| `points_assists_rebounds` | `player_points_rebounds_assists` | PRA |
-| `points_rebounds` | `player_points_rebounds` | |
-| `points_assists` | `player_points_assists` | |
-| `assists_rebounds` | `player_rebounds_assists` | |
-| `steals` | `player_steals` | |
-| `blocks` | `player_blocks` | |
-| `turnovers` | `player_turnovers` | |
-| `field_goals_made` | `player_field_goals` | Labelled “Field Goals” in the API docs |
-| `free_throws_made` | `player_frees_made` | |
-| `field_goals_attempted` | **none documented** | `player_frees_attempts` exists for FTAs; **no FGA key** on the published NBA list |
+| **`us`** | US sportsbooks | `draftkings`, `fanduel`, `betmgm`, `betrivers`, `bovada`, `williamhill_us` (Caesars), `fanatics`, … |
+| **`us2`** | Additional US sportsbooks | `espnbet` (theScore Bet), `fliff`, `hardrockbet`, `ballybet`, `rebet`, … |
+| **`us_dfs`** | US DFS / pick’em | `prizepicks`, `underdog`, `pick6`, `betr_us_dfs` |
+| **`us_ex`** | US exchanges / prediction markets | `kalshi`, `novig`, `polymarket`, `prophetx`, `betopenly` |
 
-**Alternates (phase 3):** `player_*_alternate` for the same families (e.g. `player_points_alternate`). Docs say these cover milestones (X+) and book “alternate” labels.
+Each selected region key counts as **1** toward the credit formula when passed in `regions=`. Selecting all four → **×4** vs `us` alone.
 
-**MVP market set (recommended):** the five board chips first —  
-`player_points,player_rebounds,player_assists,player_threes,player_points_rebounds_assists`  
-(5 markets). Expand to the 13 documented markets once budget is proven.
+**DFS note (docs):** “Odds on DFS sites can vary based on user selections, therefore odds are indicative only.” PrizePicks demons/goblins are mapped into `*_alternate` markets with assigned prices (goblins default odds, demons +100) per the same page.
+
+**Default Settings:** all four regions **on**; user can turn any off. Live credit estimate uses the count of enabled regions.
 
 ---
 
-## 4. Credit budget and plan tier
+## 4. Market map (ship all documented)
 
-### Documented pricing ([homepage](https://the-odds-api.com/), extracted 2026-10-08)
-
-| Plan | Price | Credits / month | Historical odds |
+| open-prop `id` | Odds API key | In Settings toggle | Odds in UI |
 |---|---|---|---|
-| Starter | Free | 500 | Not included (struck through on homepage) |
-| 20K | **$30** | 20,000 | Yes |
-| 100K | **$59** | 100,000 | Yes |
-| 5M | $119 | 5,000,000 | Yes |
-| 15M | $249 | 15,000,000 | Yes |
+| `points` | `player_points` | yes | yes |
+| `rebounds` | `player_rebounds` | yes | yes |
+| `assists` | `player_assists` | yes | yes |
+| `three_point_field_goals_made` | `player_threes` | yes | yes |
+| `points_assists_rebounds` | `player_points_rebounds_assists` | yes | yes |
+| `points_rebounds` | `player_points_rebounds` | yes | yes |
+| `points_assists` | `player_points_assists` | yes | yes |
+| `assists_rebounds` | `player_rebounds_assists` | yes | yes |
+| `steals` | `player_steals` | yes | yes |
+| `blocks` | `player_blocks` | yes | yes |
+| `turnovers` | `player_turnovers` | yes | yes |
+| `field_goals_made` | `player_field_goals` | yes | yes |
+| `free_throws_made` | `player_frees_made` | yes | yes |
+| `field_goals_attempted` | — | n/a | **No odds** (always) |
 
-There is **no $39 tier** on the published homepage. Adam’s “$39–59” band maps to **$30 (20K)** or **$59 (100K)** only.
+**Default:** all 13 toggles **on**. User may enable e.g. only points + assists.
 
-### Cost formula (live event odds)
-
-From the [v4 event-odds section](https://the-odds-api.com/liveapi/guides/v4/#get-event-odds):
-
-```text
-cost = [number of unique markets returned] × [number of regions specified]
-```
-
-Empty responses do not count. Markets requested but absent from the response are not charged.
-
-Historical event odds: **10×** that ([same guide](https://the-odds-api.com/liveapi/guides/v4/#get-historical-event-odds)).
-
-Events list: **free**.
-
-### Math for a typical 10-game night
-
-Assume `regions=us` (1 region), all requested markets return.
-
-| Pull shape | Markets | Credits / event | Credits / 10-game slate |
-|---|---:|---:|---:|
-| MVP (PTS/REB/AST/3PM/PRA) | 5 | 5 | **50** |
-| All 13 mapped stats | 13 | 13 | **130** |
-| MVP + same alts (phase 3) | 10 | 10 | **100** |
-| MVP with `us,us2` | 5 | 10 | **100** |
-| One historical MVP snapshot × 10 games | 5 | 50 | **500** |
-
-**Refresh / TTL (app-side, not provider):** props update ~60s on the provider; we should not poll that often.
-
-| Usage pattern | Pulls / night | Credits / night (MVP 50) | Credits / night (full 130) |
-|---|---:|---:|---:|
-| Open once | 1 | 50 | 130 |
-| TTL 15 min × 4 hours | 16 | 800 | 2,080 |
-| TTL 30 min × 4 hours | 8 | 400 | 1,040 |
-
-**Monthly (illustrative):** ~25 NBA evenings the user actually opens the app.
-
-| Pattern | MVP @ 50 | Full @ 130 |
-|---|---:|---:|
-| 1 pull / evening × 25 | 1,250 | 3,250 |
-| 8 pulls / evening × 25 | 10,000 | 26,000 |
-| 16 pulls / evening × 25 | 20,000 | 52,000 |
-
-### Recommendation
-
-- **Plan: $59 / 100K credits.** Leaves headroom for full 13-market pulls, a few refreshes per night, and occasional discovery/`markets` calls. The **$30 / 20K** plan only fits MVP + tight TTL (or ~1 pull/night on full markets); easy to blow on a heavy evening.
-- **Default regions: `us` only.** Add `us2` or named `bookmakers=` only if Adam needs a specific book not in `us`.
-- **Default TTL: 10–15 minutes** while the window is open; never auto-poll when the app is backgrounded (no daemon).
-- **Do not use historical event odds for charts.** At 10× cost, one evening of “every 15 min for 4 hours” historical backfill for MVP × 10 games would be `16 × 500 = 8,000` credits. Instead, **append a local snapshot every live pull** (`pulled_at`). History only exists when the app ran.
-
-Free 500 credits: enough to prototype (~10 MVP slate pulls), not for daily use.
+**Alternates (later phase):** `player_*_alternate` as separate toggles or a single “Include alternates” switch (each alternate key is another market in the credit product).
 
 ---
 
-## 5. Fit to open-prop (no backend)
+## 5. Credit math ($59 / 100K plan)
 
-### Pull lifecycle
+**Formula (live event odds):**  
+`cost_per_event = (unique markets returned) × (regions specified)`  
+`cost_per_pull ≈ cost_per_event × (pregame events requested)`  
+([v4 event odds](https://the-odds-api.com/liveapi/guides/v4/#get-event-odds)). Empty responses free. Events list free.
 
-1. User opens the app or taps **Refresh odds** (Board / Home).
-2. If no API key → settings prompt; skip network.
-3. If last successful pull’s `pulled_at` is within TTL → serve SQLite; show age.
-4. Else:
-   - `GET .../events` for `basketball_nba` (free), filter to tonight’s slate (`commenceTimeFrom` / `To` in local/America/Chicago day bounds, or keep “upcoming” and filter client-side).
-   - For each event id (cap concurrent requests; backoff on 429):  
-     `GET .../events/{id}/odds?regions=us&markets=...&oddsFormat=american`.
-   - Write events + snapshot rows + quota log in one transaction.
-5. Match `description` names → NBA `player_id` (see §7).
-6. UI reads latest snapshot (and optional prior snapshots for sparkline).
+**Homepage tier:** $59 → **100,000 credits/month**, historical included; reset on the **1st** ([FAQs](https://the-odds-api.com/manage/faqs.html), [homepage](https://the-odds-api.com/)).
 
-Off days: events empty → no charge; UI says “No NBA games with odds right now.”
+### Full load: 13 markets × 4 regions × 10 games
 
-### SQLite (app data DB, same file family as game logs)
+If every market returns for every event:
 
-Suggested tables (names flexible):
+| | Credits |
+|---|---:|
+| Per event | 13 × 4 = **52** |
+| Per pull (10 games) | 52 × 10 = **520** |
+| Pulls that fit in 100K (slate-only) | ⌊100000 / 520⌋ = **192** |
+| 1 pull × 25 evenings / month | **13,000** |
+| 8 pulls × 25 evenings | **104,000** (over budget) |
+| 5 pulls × 25 evenings | **65,000** |
+| Max pulls / night if using the whole month on one night | 192 |
+
+So **full markets + all 4 regions** is fine for a few refreshes per night across a month, but **aggressive polling (e.g. every 5–15 min all evening) will exhaust 100K**. Settings toggles and the credit guard are required, not optional polish.
+
+### How toggles change cost (10-game slate, assume all requested markets return)
+
+| Markets on | Regions on | Credits / pull | Pulls in 100K | 25 nights × 1 pull | 25 nights × 8 pulls |
+|---:|---:|---:|---:|---:|---:|
+| 13 | 4 (`us,us2,us_dfs,us_ex`) | **520** | 192 | 13,000 | 104,000 |
+| 13 | 2 (e.g. `us,us2` only) | 260 | 384 | 6,500 | 52,000 |
+| 13 | 1 (`us`) | 130 | 769 | 3,250 | 26,000 |
+| 5 | 4 | 200 | 500 | 5,000 | 40,000 |
+| 5 | 1 | 50 | 2,000 | 1,250 | 10,000 |
+| 2 (PTS+AST) | 4 | 80 | 1,250 | 2,000 | 16,000 |
+| 2 | 1 | 20 | 5,000 | 500 | 4,000 |
+
+**UI:** Settings and the Refresh control show  
+`Estimate: N markets × R regions × G games ≈ C credits (D remaining)`.  
+`G` = current pregame event count from the last events fetch (or “—” until fetched). Recompute whenever toggles change.
+
+**Budget guard (locked):** pause auto-poll (and warn on manual refresh) when `x-requests-remaining` &lt; max(estimated next pull, user threshold). Default threshold suggestion: **2× estimated full slate** or a user field (e.g. 2,000).
+
+---
+
+## 6. Devig and edge by book type
+
+open-prop’s model gives `clear_probability` ≈ P(stat clears the line). Compare to a **fair** market probability derived from book prices.
+
+### A. Traditional sportsbooks (`us`, `us2`)
+
+Two-way Over/Under at the same `point`:
+
+1. Convert American (or decimal) prices → raw implied probs.  
+2. **Multiplicative devig:** `p_fair = p_raw / (p_over + p_under)`.  
+3. **Edge (Over)** = `model_p_over − p_fair_over` (and symmetric for Under).
+
+Half-points: no push; align model `at_least` with book convention in tests.
+
+### B. DFS / pick’em (`us_dfs`)
+
+Docs: prices are **indicative**; entries often use fixed payouts or multipliers rather than a classic vigged two-way market. PrizePicks alternate mapping uses assigned odds for demons/goblins.
+
+**Plan:**
+
+- Still store `price` / `point` / side when present.  
+- **Do not** apply the same multiplicative two-way devig unless both Over and Under exist at the same point with book-style prices.  
+- If only one side (or multiplier-style): treat displayed implied prob as **indicative**, label UI **“DFS (indicative)”**, and either:
+  - show model % vs that indicative implied **without** calling it “devigged fair,” or  
+  - skip edge and show model % + DFS line only.  
+- Prefer comparing model to **sportsbook fair** when both exist for the same player/line; use DFS as a line source / secondary quote.
+
+Exact PrizePicks/Underdog outcome shapes should be confirmed against a recorded fixture in Phase 1 — docs do not publish a full DFS JSON schema beyond the general outcome fields and the demon/goblin note.
+
+### C. Exchanges (`us_ex`)
+
+Back (and sometimes lay) prices; optional `includeBetLimits`.  
+
+**Plan:** use **back** Over/Under when both exist → same multiplicative devig as sportsbooks. If only one side, show indicative. Label **“Exchange”**. Kalshi/Polymarket sports structures may differ; fixture-drive parsing and disable edge when the pair is incomplete.
+
+### UI grouping
+
+Board/Player group or badge quotes: **Sportsbook** / **DFS** / **Exchange**. Default “best Over” / “best Under” sorts **sportsbooks first**; DFS/exchange opt-in for “best” or shown in an expanded row.
+
+---
+
+## 7. Settings (product)
+
+### API key
+
+- Entered on Settings; saved only from Rust.  
+- Storage: file under `app.path().app_data_dir()` (same family as `open-prop.db`), e.g. `odds_api_key`, written with **`0600`** on Unix.  
+- **Never** log the key; **never** return the full key to the frontend after save — only masked (`••••…abcd`) plus `present: true`.  
+- Actions: **Test** (cheap call: `/events` or sports — prefer **0-credit** `/events`), **Replace**, **Clear**.  
+- **Tradeoff (honest):** the file is **plaintext on disk**. Acceptable for a **single-user desktop** app on the user’s machine (same trust as the SQLite cache). Optional later: light **obfuscation** (xor/encoding) labeled clearly as **obfuscation, not security**. Never git, never `.env`.
+
+### Toggles
+
+- **Markets:** one switch per documented mapping (13).  
+- **Regions:** `us`, `us2`, `us_dfs`, `us_ex`.  
+- Live credit estimate from selection × pregame game count.
+
+### Refresh
+
+- Default: **manual** only.  
+- Optional: recurring poll, interval ≥ minimum (recommend min **2 min**, default **5 min**), **only while app is open / window focused** (define: main window exists and not suspended).  
+- Credit guard pauses polling when remaining &lt; threshold; banner explains why.
+
+### Other
+
+- Preferred sportsbook key (optional) for primary quote.  
+- Show DFS / exchange columns (off by default for edge sort).
+
+---
+
+## 8. Pull lifecycle
+
+1. Load Settings (key, toggles, poll).  
+2. Manual refresh or poll tick → if no key or guard tripped → stop with message.  
+3. `GET .../events` (free) → filter **pregame only**.  
+4. For each remaining event (concurrency limit, 429 backoff):  
+   `GET .../odds?regions={enabled}&markets={enabled}&oddsFormat=american`.  
+5. Transaction: upsert events, insert snapshot rows (`pulled_at`), append quota log.  
+6. Match names → `player_id`.  
+7. UI reads latest snapshot; history = prior `pulled_at` values.
+
+Off day / all tipped: empty pregame list → no odds calls → 0 credits.
+
+---
+
+## 9. SQLite
 
 ```sql
--- Odds API event metadata (latest known)
 CREATE TABLE odds_events (
   event_id TEXT PRIMARY KEY,
   sport_key TEXT NOT NULL,
@@ -182,26 +247,23 @@ CREATE TABLE odds_events (
   updated_at TEXT NOT NULL
 );
 
--- One row per outcome per pull (line history = rows over pulled_at)
 CREATE TABLE odds_snapshots (
   id INTEGER PRIMARY KEY,
   pulled_at TEXT NOT NULL,
   event_id TEXT NOT NULL,
   bookmaker_key TEXT NOT NULL,
+  region_key TEXT,                 -- us | us2 | us_dfs | us_ex when known
+  book_kind TEXT,                  -- sportsbook | dfs | exchange
   market_key TEXT NOT NULL,
-  player_name TEXT NOT NULL,      -- outcome.description
-  player_id INTEGER,             -- nullable until matched
-  name TEXT NOT NULL,            -- Over / Under
-  price REAL NOT NULL,           -- American or decimal as stored
-  odds_format TEXT NOT NULL,     -- 'american' | 'decimal'
-  point REAL,                    -- line
+  player_name TEXT NOT NULL,
+  player_id INTEGER,
+  name TEXT NOT NULL,
+  price REAL NOT NULL,
+  odds_format TEXT NOT NULL,
+  point REAL,
   bookmaker_last_update TEXT,
   UNIQUE (pulled_at, event_id, bookmaker_key, market_key, player_name, name, point)
 );
-CREATE INDEX idx_odds_snapshots_lookup
-  ON odds_snapshots (player_id, market_key, pulled_at);
-CREATE INDEX idx_odds_snapshots_event
-  ON odds_snapshots (event_id, pulled_at);
 
 CREATE TABLE odds_quota_log (
   id INTEGER PRIMARY KEY,
@@ -214,7 +276,6 @@ CREATE TABLE odds_quota_log (
   detail TEXT
 );
 
--- Optional durable name map after human/auto confirm
 CREATE TABLE odds_player_map (
   player_name TEXT PRIMARY KEY,
   player_id INTEGER NOT NULL,
@@ -222,168 +283,78 @@ CREATE TABLE odds_player_map (
 );
 ```
 
-**Line movement:** for a `(player_id, market_key, bookmaker, point)` (or main line only), chart `price` / fair prob over distinct `pulled_at`. Gaps mean the app was closed — label the chart “Only while Open Prop was open,” not exchange-grade history.
+App settings (toggles, poll interval, threshold) can live in a small `odds_settings` table or a JSON file next to the key — prefer SQLite for one backup story.
 
-### API key storage
+---
 
-- User pastes key in Settings (never shipped in repo, never `.env` in git).
-- Prefer **OS keychain** via a Tauri plugin (e.g. stronghold / keyring) if we already accept that dependency; otherwise **file under `app.path().app_data_dir()`** with restricted permissions (same directory as `open-prop.db` today in `lib.rs`), e.g. `odds_api_key` with mode `0600`.
-- Commands read the key only in Rust; do not echo it back to the frontend after save (return masked `…xxxx`).
-- Document in README: key is local to the machine; uninstall may wipe app data.
+## 10. Rust / UI sketch
 
-### Rust command layer
+- `src-tauri/src/odds.rs` + commands: `odds_status`, `odds_set_key`, `odds_clear_key`, `odds_test_key`, `odds_refresh`, `odds_for_board`, `odds_for_player`, `odds_estimate`.  
+- Async + `spawn_blocking` for DB (same as existing reads).  
+- Board: line, prices by kind, fair % (sportsbooks), model %, edge %, stale age, FGA never shows odds.  
+- Player: book line, “Use book line,” sparkline from snapshots.  
+- Home/Settings: masked key, toggles, estimate, remaining credits, poll controls.
 
-Mirror `nba.rs` / `commands.rs`:
+---
 
-- `src-tauri/src/odds.rs` — HTTP client (reuse wreq/Chrome TLS pattern if the Odds API needs it; their docs show plain HTTPS — verify in implementation; fallback to `reqwest`/`wreq` as needed), parse JSON, map errors.
-- Tauri commands (async + `spawn_blocking` for DB, same as Batch A):
-  - `odds_status` — key present?, last pull, remaining credits from last header.
-  - `odds_set_key` / `odds_clear_key`
-  - `odds_refresh` — events + per-event odds with TTL/budget guards.
-  - `odds_for_player` — latest (and optional history) for Board/Player.
-- Budget guard: refuse refresh if `remaining < estimated_cost` (events × markets × regions), with a clear message.
-- Record every response’s quota headers into `odds_quota_log`.
+## 11. Phased rollout (updated)
 
-### Price math (model vs book)
+### Phase 1 — Core feed
 
-1. Take Over and Under American prices for the same `(player, market, point, book)`.
-2. Convert to implied probabilities; **devig** (e.g. multiplicative: `p_fair = p_raw / (p_over + p_under)`). Document the chosen method in Method; keep it simple and deterministic.
-3. Model side: existing `predict` → `clear_probability` is P(stat ≥ line) for the half-point / integer line the user set ([`fit.rs`](../src-tauri/src/engine/fit.rs)). For a book line `L`:
-   - If open-prop’s `at_least` matches book convention for that `L`, use it directly for Over.
-   - Under ≈ `1 - P(stat ≥ L)` or `P(stat ≤ L-ε)` depending on push rules; **half points** (most NBA props) have no push — Over is `stat > L`, which for half-lines equals `stat ≥ ceil(L)`. Confirm against the model’s `at_least` semantics in implementation tests.
-4. **Edge (Over)** ≈ `model_p_over - fair_p_over` (or Kelly input later — out of scope for MVP).
-5. Multi-book: show best Over / best Under prices, and a consensus fair (median or volume-weighted later). MVP: pick one preferred book + “best available.”
-6. Alt lines: run the same math at each `point`; highlight the line that maximizes |edge| or matches the user’s Board line.
+- Key file (0600) + Settings (markets, regions, estimate, poll, guard).  
+- Pregame events + event-odds for all **enabled** documented markets × regions.  
+- Snapshots + quota log.  
+- Name match v1.  
+- Board + Player sportsbook quotes + multiplicative devig edge.  
+- FGA: no odds affordance.  
+- Fixture tests; no live key in CI.
 
-**Do not** add an odds feed that implies guaranteed edge; Method copy stays: model probability vs market, no automatic bet sizing.
+### Phase 2 — History + DFS/exchange presentation
 
-### UI
+- Sparklines / line moved since first pull.  
+- DFS indicative labeling; exchange back-price handling from fixtures.  
+- Credit dashboard (pulls today, projected month).
 
-**Board**
+### Phase 3 — Alternates
 
-- Column or chip: book line, Over price, fair %, model %, edge %.
-- Filter: “only props with odds,” sort by edge.
-- Stale badge: “Odds as of 12m ago” / “Refresh.”
-- Quota strip on Home: remaining credits (from last header).
+- `*_alternate` toggles; alt-line picker; edge across lines.
 
-**Player page**
+---
 
-- Next to the line control: book’s main line + Over/Under; button “Use book line.”
-- Small sparkline of line/price if ≥2 snapshots exist.
-- Unmatched name: show raw `description` + “Link to player…” using the cached roster.
+## 12. Player name matching
 
-**Settings**
+Unchanged: normalize → roster/team-scoped exact → high-threshold fuzzy → `odds_player_map`. Odds API `/participants` for NBA is **teams**, not players.
 
-- API key field, preferred book, market set (MVP vs full), TTL, region.
+---
 
-### Failure modes
+## 13. Test plan
 
-| Case | Behavior |
+- Redacted fixtures for `us` sportsbook props, and separate fixtures for `us_dfs` / `us_ex` once captured.  
+- Tests: parse, credit estimator (markets × regions × games), pregame filter, multiplicative devig, DFS “no false devig,” budget guard, TTL/poll min.  
+- No API keys in repo.
+
+---
+
+## 14. Remaining open questions
+
+1. **Poll defaults:** confirm minimum **2 min** / default **5 min**, and whether polling requires window focus or merely “process running with main window open.”  
+2. **Credit-guard default:** prefer fixed floor (e.g. 2,000 remaining) or **2× next-pull estimate**?  
+3. **DFS edge:** OK to show **indicative only** (no edge %) until fixtures prove a clean two-way market, or always show a non-devigged “model vs DFS implied” delta with a warning?  
+4. **Best price:** sportsbooks-only for “best Over/Under,” or include exchanges when both sides exist?  
+5. **Timezone for “today” helpers** (if we add a day filter beyond “all pregame upcoming”): America/Chicago vs device local? (Pregame filter itself is absolute `commence_time`.)  
+6. **Obfuscation:** ship plaintext key file only for v1, or add labeled obfuscation in Phase 1?
+
+---
+
+## 15. Summary
+
+| Choice | Locked recommendation |
 |---|---|
-| No key | Settings CTA; model UI unchanged |
-| Quota exhausted (`remaining` 0 or 401/402 if returned) | Freeze pulls; show remaining; keep last snapshot |
-| HTTP 429 | Exponential backoff; partial slate OK |
-| Off day / empty events | Friendly empty state; 0 credits |
-| Book missing a market | Charge only returned markets; show “—” |
-| Late scratch | Odds may linger until book pulls them (~15 min after market `last_update` stops per docs); mark stale if `bookmaker_last_update` older than threshold |
-| Name mismatch | Leave `player_id` null; exclude from Board edge sort until mapped |
-| Stale TTL | Show data + age; don’t pretend live |
-
----
-
-## 6. Phased rollout
-
-### Phase 0 — Plan (this doc)
-
-No code.
-
-### Phase 1 — MVP
-
-- Key storage + Settings.
-- Events + event-odds for **5 MVP markets**, `regions=us`, American odds.
-- SQLite events + snapshots + quota log.
-- Name match v1 (exact + simple normalize).
-- Board + Player: line, Over/Under, fair %, model %, edge %.
-- TTL + budget guard.
-- Fixture-based Rust tests (recorded JSON, no live key).
-
-### Phase 2 — Local history
-
-- Sparklines / “line moved X → Y since first pull today.”
-- Optional export of snapshots.
-- Still no historical API unless Adam explicitly wants a one-shot backfill tool (credit warning).
-
-### Phase 3 — Alts + more markets
-
-- Remaining mapped markets (13).
-- `*_alternate` markets; alt-line picker on Player.
-- Optional `bookmakers=` allowlist; optional second region with cost calculator in UI.
-- Hardening name map (team-scoped, nicknames).
-
----
-
-## 7. Player name matching
-
-Odds API gives **display names** in `description`, not NBA person ids. open-prop keys players by `player_id` from stats.nba.com.
-
-**v1 algorithm**
-
-1. Normalize: uppercase, strip accents, collapse punctuation/suffixes (`Jr.`, `III`).
-2. Exact match against season roster + seed-season names in SQLite.
-3. If the event’s teams are known, restrict candidates to those two teams’ rosters (Ambiguous “Jordan” problem).
-4. Unique fuzzy match (Levenshtein / token set) above a high threshold → auto-link + write `odds_player_map`.
-5. Else leave unmatched for UI confirm.
-
-**Not available:** Odds API `/participants` for NBA returns **teams**, not players ([docs](https://the-odds-api.com/liveapi/guides/v4/#get-participants)). Do not expect a player id feed from them.
-
----
-
-## 8. Test plan
-
-- Check in **redacted fixtures** under e.g. `src-tauri/tests/fixtures/odds/` (event list + one event-odds payload). No API keys in fixtures or CI.
-- Unit tests: parse → rows; credit estimator; devig; edge vs a fixed model pmf; TTL short-circuit (mock clock); budget refuse.
-- Name match tests with known roster fixtures.
-- Optional `#[ignore]` live test behind env key (local only), same pattern as `live_*` NBA tests.
-- UI: vitest for formatting (American odds, edge %) without network.
-
----
-
-## 9. Open questions for Adam
-
-1. **Plan:** Confirm **$59 / 100K** vs trying **$30 / 20K** with MVP-only markets and strict TTL.
-2. **Books:** Prefer one book (e.g. DraftKings), best-of-`us`, or also `us2` / DFS (`us_dfs` — indicative only per docs)?
-3. **MVP markets:** Five board chips only, or all 13 documented on day one?
-4. **FGA:** Accept “no odds” for `field_goals_attempted`, or drop/hide that chip when odds mode is on?
-5. **Key storage:** OS keychain plugin OK, or app-data file enough?
-6. **Auto-refresh:** Only manual, or timer while Board is focused (TTL 10–15 min)?
-7. **Historical API:** Ever needed for research backfills, or is local-snapshot history enough?
-8. **Edge display:** Show raw edge % only, or also a muted “not advice” on Method/Board (compliance preference)?
-9. **Timezone for “today’s slate”:** Always `America/Chicago` (user zone), or device local?
-10. **In-play:** Include live games or pre-match only? (In-play burns credits faster if TTL is short.)
-
----
-
-## 10. Suggested implementation order (when coding starts)
-
-1. Fixtures + parse + schema migration.  
-2. Key storage + `odds_refresh` budget/TTL.  
-3. Name match + Board column.  
-4. Player page + “use book line.”  
-5. Snapshot sparkline.  
-6. Alts / full market set.
-
----
-
-## 11. Summary recommendation
-
-| Choice | Recommendation |
-|---|---|
-| Provider | The Odds API v4, sport `basketball_nba` |
-| Access pattern | On open / on demand; SQLite snapshots for history |
-| Credits | Event odds = markets_returned × regions; events list free |
-| Tier | **$59 / 100K / mo** (within Adam’s band; $30 only if MVP+strict TTL) |
-| Regions | `us` only at first |
-| MVP markets | PTS, REB, AST, 3PM, PRA (5) |
-| History | Local `pulled_at` snapshots; avoid 10× historical endpoint for routine use |
-| Gaps | No documented FGA market key; no player ids from API |
-
+| Tier | **$59 / 100K** |
+| Regions | **`us`, `us2`, `us_dfs`, `us_ex`** (toggleable; all on by default) |
+| Markets | All **13** documented mappings (toggleable); **FGA = no odds** |
+| Full-slate cost | **13 × 4 × 10 = 520 credits/pull** if everything returns |
+| Key | App-data file, **0600**, masked UI; no keychain; plaintext-on-disk tradeoff documented |
+| Refresh | Manual default; optional in-app poll + credit guard |
+| Games | **Pregame only** |
+| History | Local snapshots; avoid 10× historical API for routine use |
