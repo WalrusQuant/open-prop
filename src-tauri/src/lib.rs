@@ -11,10 +11,15 @@ use std::path::Path;
 
 use tauri::Manager;
 
-pub use crate::models::TrainReport;
+pub use crate::models::{SyncReport, TrainReport};
 
 pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<TrainReport, String> {
     commands::train_cached(db_path, season, season_type)
+}
+
+/// Pulls one season type into the database at `db_path`, the same request and merge the app uses.
+pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<SyncReport, String> {
+    commands::sync_cached(db_path, season, season_type)
 }
 
 pub fn run() {

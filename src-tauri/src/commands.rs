@@ -555,6 +555,21 @@ pub fn train_cached(db_path: &Path, season: &str, season_type: &str) -> Result<T
     })
 }
 
+pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<SyncReport, String> {
+    let season = season::validate_season(season).map_err(show)?;
+    let season_type = season::validate_season_type(season_type).map_err(show)?;
+    let client = NbaClient::new().map_err(show)?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| format!("could not start the sync runtime: {error}"))?;
+    let games = runtime
+        .block_on(client.player_game_logs(&season, &season_type))
+        .map_err(show)?;
+    let connection = db::open(db_path).map_err(show)?;
+    db::merge_logs(&connection, &season, &season_type, &games).map_err(show)
+}
+
 pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, AppError> {
     let models_dir = data_dir.join("models");
     // Older installs kept one file per stat. A failed move leaves that file in place.
