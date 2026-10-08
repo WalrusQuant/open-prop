@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use chrono::{Local, Utc};
@@ -23,29 +23,81 @@ pub struct AppState {
     pub db: Mutex<Connection>,
     pub nba: NbaClient,
     pub syncing: AtomicBool,
+    /// Held for a whole fit, so a second train from any page is turned away.
+    pub training: AtomicBool,
     pub models_dir: PathBuf,
     pub spec_dirs: Vec<PathBuf>,
-    fitted: Mutex<HashMap<String, Arc<Fitted>>>,
-    /// Bumped when a train replaces the files, so an in-flight predict cannot put the old model back.
-    model_generation: AtomicU64,
+    fitted: ModelCache<Fitted>,
 }
 
-struct SyncGuard<'a>(&'a AtomicBool);
+struct BusyGuard<'a>(&'a AtomicBool);
 
-impl Drop for SyncGuard<'_> {
+impl Drop for BusyGuard<'_> {
     fn drop(&mut self) {
         self.0.store(false, Ordering::SeqCst);
     }
 }
 
-fn enter_sync(flag: &AtomicBool) -> Result<SyncGuard<'_>, String> {
+fn enter<'a>(flag: &'a AtomicBool, busy: &str) -> Result<BusyGuard<'a>, String> {
     if flag
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .is_err()
     {
-        Err("A sync is already running.".to_string())
+        Err(busy.to_string())
     } else {
-        Ok(SyncGuard(flag))
+        Ok(BusyGuard(flag))
+    }
+}
+
+/// Loaded models by season, type, and stat. The generation and the map share one
+/// lock, so a predict that loaded a file before a train finished cannot put the
+/// old model back after the train clears the cache.
+struct ModelCache<T> {
+    inner: Mutex<CacheInner<T>>,
+}
+
+struct CacheInner<T> {
+    generation: u64,
+    entries: HashMap<String, Arc<T>>,
+}
+
+impl<T> ModelCache<T> {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(CacheInner {
+                generation: 0,
+                entries: HashMap::new(),
+            }),
+        }
+    }
+
+    fn lock(&self) -> Result<MutexGuard<'_, CacheInner<T>>, String> {
+        self.inner
+            .lock()
+            .map_err(|_| "the model cache lock was poisoned".to_string())
+    }
+
+    /// The cached model, if any, and the generation it was read under.
+    fn get(&self, key: &str) -> Result<(u64, Option<Arc<T>>), String> {
+        let inner = self.lock()?;
+        Ok((inner.generation, inner.entries.get(key).cloned()))
+    }
+
+    /// Keeps a model loaded under `generation` only if no train finished since.
+    fn insert_if_current(&self, generation: u64, key: String, value: Arc<T>) -> Result<bool, String> {
+        let mut inner = self.lock()?;
+        if inner.generation != generation {
+            return Ok(false);
+        }
+        inner.entries.entry(key).or_insert(value);
+        Ok(true)
+    }
+
+    fn invalidate(&self) -> Result<(), String> {
+        let mut inner = self.lock()?;
+        inner.generation += 1;
+        inner.entries.clear();
+        Ok(())
     }
 }
 
@@ -116,7 +168,7 @@ pub async fn sync_season(
     // Field borrows stay split so the sync flag and the database lock do not
     // overlap, and the HTTP await never holds the SQLite mutex.
     let state = state.inner();
-    let _guard = enter_sync(&state.syncing)?;
+    let _guard = enter(&state.syncing, "A sync is already running.")?;
     let games = state
         .nba
         .player_game_logs(&season, &season_type)
@@ -202,6 +254,7 @@ pub async fn train_models(
     let season = season::validate_season(&query.season).map_err(show)?;
     let season_type = season::validate_season_type(&query.season_type).map_err(show)?;
     let state = state.inner();
+    let _guard = enter(&state.training, "A fit is already running. Wait for it to finish.")?;
     let games = {
         let connection = lock_db(&state.db)?;
         db::season_games(&connection, &season, &season_type).map_err(show)?
@@ -218,14 +271,7 @@ pub async fn train_models(
     })
     .await
     .map_err(|error| format!("training stopped: {error}"))?;
-    {
-        let mut cache = state
-            .fitted
-            .lock()
-            .map_err(|_| "the model cache lock was poisoned".to_string())?;
-        cache.clear();
-    }
-    state.model_generation.fetch_add(1, Ordering::SeqCst);
+    state.fitted.invalidate()?;
     Ok(TrainReport {
         season,
         season_type,
@@ -251,14 +297,7 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
         return Err("No cached games for that season. Sync it, then train.".to_string());
     }
     let key = format!("{season}|{season_type}|{}", stat.id());
-    let generation = state.model_generation.load(Ordering::SeqCst);
-    let cached = {
-        let cache = state
-            .fitted
-            .lock()
-            .map_err(|_| "the model cache lock was poisoned".to_string())?;
-        cache.get(&key).cloned()
-    };
+    let (generation, cached) = state.fitted.get(&key)?;
     let models_dir = state.models_dir.clone();
     let line = query.line;
     let window = query.window;
@@ -287,15 +326,7 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
     })
     .await
     .map_err(|error| format!("prediction stopped: {error}"))??;
-    {
-        let mut cache = state
-            .fitted
-            .lock()
-            .map_err(|_| "the model cache lock was poisoned".to_string())?;
-        if state.model_generation.load(Ordering::SeqCst) == generation {
-            cache.entry(key).or_insert(fitted);
-        }
-    }
+    state.fitted.insert_if_current(generation, key, fitted)?;
     Ok(Prediction {
         stat: stat.id().to_string(),
         stat_label: stat.label().to_string(),
@@ -480,9 +511,65 @@ pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, 
         db: Mutex::new(connection),
         nba: NbaClient::new()?,
         syncing: AtomicBool::new(false),
+        training: AtomicBool::new(false),
         models_dir: data_dir.join("models"),
         spec_dirs: engine::spec_dirs(data_dir),
-        fitted: Mutex::new(HashMap::new()),
-        model_generation: AtomicU64::new(0),
+        fitted: ModelCache::new(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_second_fit_is_turned_away_until_the_first_ends() {
+        let flag = AtomicBool::new(false);
+        let first = enter(&flag, "A fit is already running.").unwrap();
+        let second = enter(&flag, "A fit is already running.");
+        assert_eq!(second.err().as_deref(), Some("A fit is already running."));
+        drop(first);
+        assert!(enter(&flag, "busy").is_ok(), "the guard releases on drop");
+    }
+
+    #[test]
+    fn a_fit_running_on_another_thread_blocks_a_second_one() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let (started, wait_start) = std::sync::mpsc::channel();
+        let (finish, wait_finish) = std::sync::mpsc::channel::<()>();
+        let worker = {
+            let flag = Arc::clone(&flag);
+            std::thread::spawn(move || {
+                let _guard = enter(&flag, "busy").unwrap();
+                started.send(()).unwrap();
+                wait_finish.recv().unwrap();
+            })
+        };
+        wait_start.recv().unwrap();
+        assert!(enter(&flag, "busy").is_err());
+        finish.send(()).unwrap();
+        worker.join().unwrap();
+        assert!(enter(&flag, "busy").is_ok());
+    }
+
+    #[test]
+    fn a_predict_that_straddles_a_train_does_not_pin_the_old_model() {
+        let cache: ModelCache<String> = ModelCache::new();
+        let (generation, cached) = cache.get("2025-26|Regular Season|points").unwrap();
+        assert!(cached.is_none());
+        // The train finishes while the predict is still reading the old file.
+        cache.invalidate().unwrap();
+        let kept = cache
+            .insert_if_current(generation, "2025-26|Regular Season|points".to_string(), Arc::new("old".to_string()))
+            .unwrap();
+        assert!(!kept);
+        assert!(cache.get("2025-26|Regular Season|points").unwrap().1.is_none());
+
+        let (generation, _) = cache.get("2025-26|Regular Season|points").unwrap();
+        assert!(cache
+            .insert_if_current(generation, "2025-26|Regular Season|points".to_string(), Arc::new("new".to_string()))
+            .unwrap());
+        let (_, cached) = cache.get("2025-26|Regular Season|points").unwrap();
+        assert_eq!(cached.as_deref().map(String::as_str), Some("new"));
+    }
 }

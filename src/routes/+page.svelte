@@ -9,7 +9,6 @@
   let players = $state<PlayerOption[]>([]);
   let rows = $state<TrainStatReport[]>([]);
   let loadError = $state<string | null>(null);
-  let training = $state(false);
   let desktop = $state(false);
   let request = 0;
 
@@ -40,7 +39,9 @@
   $effect(() => {
     const season = session.season;
     const seasonType = session.seasonType;
-    if (!desktop || !session.ready) return;
+    // A fit that started before this page mounted reloads the scores when it ends.
+    const fitting = session.training;
+    if (!desktop || !session.ready || fitting) return;
     const id = ++request;
     loadModelScores({ season, seasonType })
       .then((next) => {
@@ -83,15 +84,18 @@
   }
 
   async function train() {
-    if (!desktop || training) return;
-    training = true;
+    if (!desktop || session.training) return;
+    session.training = true;
     loadError = null;
+    const season = session.season;
+    const seasonType = session.seasonType;
     try {
-      rows = (await trainModels({ season: session.season, seasonType: session.seasonType })).stats;
+      const report = await trainModels({ season, seasonType });
+      if (season === session.season && seasonType === session.seasonType) rows = report.stats;
     } catch (caught: unknown) {
       loadError = errorText(caught);
     } finally {
-      training = false;
+      session.training = false;
     }
   }
 </script>
@@ -142,12 +146,12 @@
       <h2>Models</h2>
       <p>One fit per stat. Open a stat for the test and what the model uses.</p>
     </div>
-    <button type="button" onclick={train} disabled={!desktop || training || !session.ready || !cached}>
-      {training ? "Training…" : "Refit season"}
+    <button type="button" onclick={train} disabled={!desktop || session.training || !session.ready || !cached}>
+      {session.training ? "Training…" : "Refit season"}
     </button>
   </div>
 
-  {#if training}
+  {#if session.training}
     <p class="sync-note">Refitting all 14 stats.</p>
   {/if}
   {#if stale}

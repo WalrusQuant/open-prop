@@ -5,6 +5,8 @@ export const session = $state({
   ready: false,
   preview: false,
   syncing: false,
+  /** Lives here, not on Home, so leaving the page does not re-enable Refit mid-fit. */
+  training: false,
   error: null as string | null,
   notice: null as string | null,
   warning: null as string | null,

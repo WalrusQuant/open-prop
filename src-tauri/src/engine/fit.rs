@@ -1,5 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::path::Path;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use chrono::{Datelike, NaiveDate};
 use serde::{Deserialize, Serialize};
@@ -297,8 +300,42 @@ pub fn save_model(fitted: &Fitted, fitted_at: &str, directory: &Path) -> AppResu
         fitted_at: Some(fitted_at.to_string()),
     };
     let path = directory.join(format!("{}.json", fitted.stat));
-    let file = std::fs::File::create(&path)?;
-    serde_json::to_writer(file, &saved)?;
+    write_atomic(&path, |writer| {
+        serde_json::to_writer(writer, &saved)?;
+        Ok(())
+    })
+}
+
+/// Writes next to `path` and renames over it, so a reader or a crash never sees half a model.
+fn write_atomic(
+    path: &Path,
+    write: impl FnOnce(&mut BufWriter<File>) -> AppResult<()>,
+) -> AppResult<()> {
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| AppError::message("A model path has no file name.".to_string()))?;
+    let temp: PathBuf = path.with_file_name(format!(
+        ".{name}.{}.{}.tmp",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    ));
+    let written = (|| -> AppResult<()> {
+        let mut writer = BufWriter::new(File::create(&temp)?);
+        write(&mut writer)?;
+        writer.flush()?;
+        writer.get_ref().sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error);
+    }
+    if let Err(error) = std::fs::rename(&temp, path) {
+        let _ = std::fs::remove_file(&temp);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -1112,6 +1149,34 @@ mod tests {
         let score = load_score(&directory, "points").unwrap();
         assert_eq!(score.fitted_at.as_deref(), Some("2026-10-07T18:00:00Z"));
         assert!(score.settings_stored);
+        let _ = std::fs::remove_dir_all(&directory);
+    }
+
+    #[test]
+    fn a_failed_save_leaves_the_old_model_loadable() {
+        let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let directory = std::env::temp_dir().join(format!("open-prop-atomic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&directory);
+        save_model(&fitted, "2026-10-07T18:00:00Z", &directory).unwrap();
+        let path = directory.join("points.json");
+        let error = write_atomic(&path, |writer| {
+            writer.write_all(br#"{"kind":"boxscore","stat":"poi"#)?;
+            Err(AppError::message("disk full".to_string()))
+        })
+        .unwrap_err();
+        assert_eq!(error.to_string(), "disk full");
+        let loaded = load_model(&directory, "points").unwrap();
+        assert_eq!(loaded.season, "2025-26");
+        let leftovers: Vec<_> = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "a failed write cleans up its temp file");
+        save_model(&fitted, "2026-10-08T18:00:00Z", &directory).unwrap();
+        let score = load_score(&directory, "points").unwrap();
+        assert_eq!(score.fitted_at.as_deref(), Some("2026-10-08T18:00:00Z"));
         let _ = std::fs::remove_dir_all(&directory);
     }
 
