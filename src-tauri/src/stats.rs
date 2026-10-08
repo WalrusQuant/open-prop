@@ -1,5 +1,7 @@
+use chrono::NaiveDate;
+
 use crate::models::{
-    BoardRow, BoardSplit, GameLog, Stat, TrendGame, TrendReport, TrendSummary, Window,
+    BoardRow, BoardSplit, GameLog, Stat, TrendGame, TrendReport, TrendSplit, TrendSummary, Window,
 };
 
 /// A game counts as an over when the stat is greater than or equal to the line.
@@ -123,6 +125,48 @@ pub fn window_games(games: &[GameLog], window: Window) -> &[GameLog] {
     }
 }
 
+/// Days off before each played game, from the previous played game. The first has none.
+fn rest_days(played_games: &[GameLog]) -> Vec<Option<i64>> {
+    let mut previous: Option<NaiveDate> = None;
+    played_games
+        .iter()
+        .map(|game| {
+            let day = NaiveDate::parse_from_str(&game.game_date, "%Y-%m-%d").ok();
+            let gap = match (previous, day) {
+                (Some(before), Some(now)) => Some((now - before).num_days() - 1),
+                _ => None,
+            };
+            if day.is_some() {
+                previous = day;
+            }
+            gap
+        })
+        .collect()
+}
+
+/// One window against the line: the count, the rate, and its 95% Wilson band.
+fn split(games: &[GameLog], played_games: &[GameLog], stat: Stat, window: Window, line: f64) -> TrendSplit {
+    let slice = window_games(played_games, window);
+    let overs = slice
+        .iter()
+        .filter(|game| is_over(stat.value(game), line))
+        .count();
+    let (low, high) = split_interval(wilson(overs as u32, slice.len() as u32));
+    TrendSplit {
+        window: window.id().to_string(),
+        sample: slice.len(),
+        overs,
+        hit_rate: if slice.is_empty() {
+            None
+        } else {
+            Some(overs as f64 / slice.len() as f64)
+        },
+        wilson_low: low,
+        wilson_high: high,
+        dnp: dnp_since(games, slice, window),
+    }
+}
+
 pub fn trend_report(
     games: &[GameLog],
     stat: Stat,
@@ -132,18 +176,27 @@ pub fn trend_report(
     season_type: &str,
 ) -> TrendReport {
     let played_games: Vec<GameLog> = games.iter().filter(|game| played(game)).cloned().collect();
+    let rests = rest_days(&played_games);
     let slice = window_games(&played_games, window);
-    let dnp = dnp_since(games, slice, window);
+    let slice_rests = &rests[played_games.len() - slice.len()..];
     let values: Vec<f64> = slice.iter().map(|game| stat.value(game)).collect();
     let averages = moving_average(&values, 3);
-    let overs = values.iter().filter(|value| is_over(**value, line)).count();
-    let (low, high) = split_interval(wilson(overs as u32, values.len() as u32));
+    let splits: Vec<TrendSplit> = Window::all()
+        .iter()
+        .map(|each| split(games, &played_games, stat, *each, line))
+        .collect();
+    let active = splits
+        .iter()
+        .find(|item| item.window == window.id())
+        .cloned()
+        .unwrap_or_else(|| split(games, &played_games, stat, window, line));
     let latest = games.last();
     let report_games = slice
         .iter()
         .zip(values.iter())
         .zip(averages.iter())
-        .map(|((game, value), average)| {
+        .zip(slice_rests.iter())
+        .map(|(((game, value), average), rest)| {
             let (location, opponent) = split_matchup(&game.matchup);
             TrendGame {
                 game_id: game.game_id.clone(),
@@ -156,6 +209,7 @@ pub fn trend_report(
                 stat: *value,
                 over: is_over(*value, line),
                 moving_avg: *average,
+                rest_days: *rest,
                 points: game.pts,
                 rebounds: game.reb,
                 assists: game.ast,
@@ -181,22 +235,19 @@ pub fn trend_report(
         window_label: window.label().to_string(),
         line,
         summary: TrendSummary {
-            sample: values.len(),
-            overs,
-            hit_rate: if values.is_empty() {
-                None
-            } else {
-                Some(overs as f64 / values.len() as f64)
-            },
-            wilson_low: low,
-            wilson_high: high,
+            sample: active.sample,
+            overs: active.overs,
+            hit_rate: active.hit_rate,
+            wilson_low: active.wilson_low,
+            wilson_high: active.wilson_high,
             mean: mean(&values),
             median: median(&values),
             sd: sample_sd(&values),
             min: values.iter().copied().reduce(f64::min),
             max: values.iter().copied().reduce(f64::max),
-            dnp,
+            dnp: active.dnp,
         },
+        splits,
         games: report_games,
     }
 }
@@ -343,6 +394,89 @@ mod tests {
         let season = trend_report(&games, Stat::Points, Window::Season, 20.0, "2025-26", "Regular Season");
         assert_eq!((season.summary.overs, season.summary.sample, season.summary.dnp), (10, 10, 2));
         assert_eq!(season.summary.hit_rate, Some(1.0));
+    }
+
+    #[test]
+    fn the_report_scores_every_window_against_one_line() {
+        let games: Vec<GameLog> = (1..=24)
+            .map(|day| game(&format!("2026-01-{day:02}"), if day > 17 { 30 } else { 10 }, 0, 0))
+            .collect();
+        let report = trend_report(&games, Stat::Points, Window::Last10, 20.0, "2025-26", "Regular Season");
+        let counts: Vec<(&str, usize, usize)> = report
+            .splits
+            .iter()
+            .map(|item| (item.window.as_str(), item.overs, item.sample))
+            .collect();
+        assert_eq!(
+            counts,
+            vec![("last_5", 5, 5), ("last_10", 7, 10), ("last_20", 7, 20), ("season", 7, 24)]
+        );
+        let last10 = &report.splits[1];
+        let (low, high) = wilson(7, 10).unwrap();
+        assert_eq!((last10.wilson_low, last10.wilson_high), (Some(low), Some(high)));
+        assert_eq!(report.summary.overs, 7);
+        assert_eq!(report.summary.wilson_low, Some(low));
+    }
+
+    #[test]
+    fn rest_counts_from_the_last_game_played() {
+        let mut games = vec![
+            game("2026-01-01", 20, 0, 0),
+            game("2026-01-02", 20, 0, 0),
+            game("2026-01-04", 0, 0, 0),
+            game("2026-01-06", 20, 0, 0),
+        ];
+        games[2].minutes = 0.0;
+        let report = trend_report(&games, Stat::Points, Window::Season, 10.0, "2025-26", "Regular Season");
+        let rests: Vec<Option<i64>> = report.games.iter().map(|item| item.rest_days).collect();
+        assert_eq!(rests, vec![None, Some(0), Some(3)]);
+    }
+
+    fn numbers(value: &serde_json::Value) -> Vec<f64> {
+        value.as_array().unwrap().iter().map(|item| item.as_f64().unwrap()).collect()
+    }
+
+    fn close(actual: Option<f64>, expected: &serde_json::Value, label: &str) {
+        match (actual, expected.as_f64()) {
+            (None, None) => {}
+            (Some(actual), Some(expected)) => {
+                assert!((actual - expected).abs() < 1e-9, "{label}: {actual} vs {expected}")
+            }
+            other => panic!("{label}: {other:?}"),
+        }
+    }
+
+    /// The same file feeds vitest, so the TS copies the preview uses cannot drift from these.
+    #[test]
+    fn desk_math_matches_the_shared_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../tests/fixtures/desk-math.json")).unwrap();
+        for case in fixture["wilson"].as_array().unwrap() {
+            let overs = case["overs"].as_u64().unwrap() as u32;
+            let games = case["games"].as_u64().unwrap() as u32;
+            let band = wilson(overs, games);
+            let label = format!("wilson {overs}/{games}");
+            close(band.map(|(low, _)| low), &case["expected"][0], &label);
+            close(band.map(|(_, high)| high), &case["expected"][1], &label);
+        }
+        for case in fixture["median"].as_array().unwrap() {
+            close(median(&numbers(&case["values"])), &case["expected"], "median");
+        }
+        for case in fixture["mean"].as_array().unwrap() {
+            close(mean(&numbers(&case["values"])), &case["expected"], "mean");
+        }
+        for case in fixture["sampleSd"].as_array().unwrap() {
+            close(sample_sd(&numbers(&case["values"])), &case["expected"], "sample sd");
+        }
+        for case in fixture["movingAverage"].as_array().unwrap() {
+            let width = case["width"].as_u64().unwrap() as usize;
+            let averages = moving_average(&numbers(&case["values"]), width);
+            let expected = case["expected"].as_array().unwrap();
+            assert_eq!(averages.len(), expected.len());
+            for (actual, expected) in averages.iter().zip(expected) {
+                close(*actual, expected, "moving average");
+            }
+        }
     }
 
     #[test]

@@ -261,6 +261,8 @@ pub struct TrendGame {
     pub stat: f64,
     pub over: bool,
     pub moving_avg: Option<f64>,
+    /// Days off before this game, counted from his previous game played. None for his first.
+    pub rest_days: Option<i64>,
     pub points: i32,
     pub rebounds: i32,
     pub assists: i32,
@@ -287,6 +289,19 @@ pub struct TrendSummary {
     pub dnp: usize,
 }
 
+/// One window scored against the line. The player page shows all four side by side.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrendSplit {
+    pub window: String,
+    pub sample: usize,
+    pub overs: usize,
+    pub hit_rate: Option<f64>,
+    pub wilson_low: Option<f64>,
+    pub wilson_high: Option<f64>,
+    pub dnp: usize,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrendReport {
@@ -302,6 +317,8 @@ pub struct TrendReport {
     pub line: f64,
     pub games: Vec<TrendGame>,
     pub summary: TrendSummary,
+    /// Last 5, last 10, last 20, and the season against the same line.
+    pub splits: Vec<TrendSplit>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -416,4 +433,48 @@ pub struct Prediction {
     pub holdout_coverage: Option<f64>,
     pub train_rows: usize,
     pub holdout_rows: usize,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The screens read stat names, short labels, and default lines from `src/lib/catalog.json`.
+    #[test]
+    fn the_screen_catalog_matches_the_rust_catalog() {
+        let catalog: serde_json::Value =
+            serde_json::from_str(include_str!("../../src/lib/catalog.json")).unwrap();
+        let stats = catalog["stats"].as_array().unwrap();
+        let ids: Vec<&str> = stats.iter().map(|item| item["id"].as_str().unwrap()).collect();
+        let labels: Vec<&str> = stats.iter().map(|item| item["label"].as_str().unwrap()).collect();
+        assert_eq!(ids, Stat::all().iter().map(|stat| stat.id()).collect::<Vec<_>>());
+        assert_eq!(labels, Stat::all().iter().map(|stat| stat.label()).collect::<Vec<_>>());
+        for item in stats {
+            assert!(!item["short"].as_str().unwrap().is_empty(), "{item}");
+            assert!(item["defaultLine"].as_f64().unwrap() > 0.0, "{item}");
+        }
+        let mut chips: Vec<&str> = catalog["chipOrder"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item.as_str().unwrap())
+            .collect();
+        chips.sort_unstable();
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        assert_eq!(chips, sorted, "chipOrder lists every stat once");
+        let windows: Vec<(&str, &str)> = catalog["windows"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| (item["id"].as_str().unwrap(), item["label"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            windows,
+            Window::all()
+                .iter()
+                .map(|window| (window.id(), window.label()))
+                .collect::<Vec<_>>()
+        );
+    }
 }

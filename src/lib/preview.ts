@@ -1,3 +1,4 @@
+import { STATS as CATALOG_STATS, WINDOWS as CATALOG_WINDOWS } from "./catalog";
 import { mean, median, movingAverage, sampleSd, wilson } from "./deskMath";
 import type {
   BoardQuery,
@@ -8,31 +9,11 @@ import type {
   TrendGame,
   TrendQuery,
   TrendReport,
+  TrendSplit,
 } from "./types";
 
-const STATS: CatalogItem[] = [
-  { id: "points", label: "Points" },
-  { id: "rebounds", label: "Rebounds" },
-  { id: "assists", label: "Assists" },
-  { id: "steals", label: "Steals" },
-  { id: "blocks", label: "Blocks" },
-  { id: "turnovers", label: "Turnovers" },
-  { id: "field_goals_made", label: "Field Goals Made" },
-  { id: "field_goals_attempted", label: "Field Goals Attempted" },
-  { id: "three_point_field_goals_made", label: "Three Pointers Made" },
-  { id: "free_throws_made", label: "Free Throws Made" },
-  { id: "points_assists", label: "Points + Assists" },
-  { id: "points_rebounds", label: "Points + Rebounds" },
-  { id: "assists_rebounds", label: "Assists + Rebounds" },
-  { id: "points_assists_rebounds", label: "Points + Assists + Rebounds" },
-];
-
-const WINDOWS: CatalogItem[] = [
-  { id: "last_5", label: "Last 5 games" },
-  { id: "last_10", label: "Last 10 games" },
-  { id: "last_20", label: "Last 20 games" },
-  { id: "season", label: "This season" },
-];
+const STATS: CatalogItem[] = CATALOG_STATS.map(({ id, label }) => ({ id, label }));
+const WINDOWS: CatalogItem[] = CATALOG_WINDOWS.map(({ id, label }) => ({ id, label }));
 
 interface Raw {
   playerId: number;
@@ -144,6 +125,14 @@ function statValue(row: Raw, stat: string): number {
   }
 }
 
+function dayGap(before: string, after: string): number {
+  const day = (iso: string) => {
+    const [year, month, date] = iso.split("-").map(Number);
+    return Math.floor(Date.UTC(year, month - 1, date) / 86400000);
+  };
+  return day(after) - day(before) - 1;
+}
+
 function windowSize(windowId: string): number | null {
   if (windowId === "last_5") return 5;
   if (windowId === "last_10") return 10;
@@ -202,6 +191,22 @@ export function previewTrend(query: TrendQuery): TrendReport {
   const overs = values.filter((value) => value >= query.line).length;
   const interval = wilson(overs, values.length);
   const player = PLAYERS.find((item) => item.playerId === query.playerId);
+  const offset = owned.length - slice.length;
+  const splits: TrendSplit[] = WINDOWS.map((item) => {
+    const count = windowSize(item.id);
+    const picked = (count == null ? owned : owned.slice(-count)).map((row) => statValue(row, query.stat));
+    const hits = picked.filter((value) => value >= query.line).length;
+    const band = wilson(hits, picked.length);
+    return {
+      window: item.id,
+      sample: picked.length,
+      overs: hits,
+      hitRate: picked.length ? hits / picked.length : null,
+      wilsonLow: band?.low ?? null,
+      wilsonHigh: band?.high ?? null,
+      dnp: 0,
+    };
+  });
   const games: TrendGame[] = slice.map((row, index) => ({
     gameId: `${row.playerId}-${row.date}`,
     gameDate: row.date,
@@ -213,6 +218,7 @@ export function previewTrend(query: TrendQuery): TrendReport {
     stat: values[index],
     over: values[index] >= query.line,
     movingAvg: averages[index],
+    restDays: offset + index === 0 ? null : dayGap(owned[offset + index - 1].date, row.date),
     points: row.points,
     rebounds: row.rebounds,
     assists: row.assists,
@@ -246,6 +252,7 @@ export function previewTrend(query: TrendQuery): TrendReport {
       max: values.length ? Math.max(...values) : null,
       dnp: 0,
     },
+    splits,
   };
 }
 

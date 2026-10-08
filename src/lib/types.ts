@@ -61,6 +61,8 @@ export interface TrendGame {
   stat: number;
   over: boolean;
   movingAvg: number | null;
+  /** Days off before this game, counted from his previous game played. Null for his first. */
+  restDays: number | null;
   points: number;
   rebounds: number;
   assists: number;
@@ -85,6 +87,17 @@ export interface TrendSummary {
   dnp: number;
 }
 
+/** One window against the line. Rust scores all four so the page does no hit-rate math. */
+export interface TrendSplit {
+  window: string;
+  sample: number;
+  overs: number;
+  hitRate: number | null;
+  wilsonLow: number | null;
+  wilsonHigh: number | null;
+  dnp: number;
+}
+
 export interface TrendReport {
   playerId: number;
   playerName: string;
@@ -98,6 +111,8 @@ export interface TrendReport {
   line: number;
   games: TrendGame[];
   summary: TrendSummary;
+  /** Last 5, last 10, last 20, and the season against the same line. */
+  splits: TrendSplit[];
 }
 
 export interface BoardQuery {

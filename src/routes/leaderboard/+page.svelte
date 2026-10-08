@@ -1,43 +1,11 @@
 <script lang="ts">
   import { goto } from "$app/navigation";
   import { errorText, loadBoard } from "$lib/api";
+  import { defaultLine, statShort } from "$lib/catalog";
   import { formatLine, formatStat } from "$lib/format";
   import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
+  import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { BoardRow, BoardSplit } from "$lib/types";
-
-  const SHORT: Record<string, string> = {
-    points: "PTS",
-    rebounds: "REB",
-    assists: "AST",
-    steals: "STL",
-    blocks: "BLK",
-    turnovers: "TOV",
-    three_point_field_goals_made: "3PM",
-    field_goals_made: "FGM",
-    field_goals_attempted: "FGA",
-    free_throws_made: "FTM",
-    points_assists: "P+A",
-    points_rebounds: "P+R",
-    assists_rebounds: "R+A",
-    points_assists_rebounds: "PRA",
-  };
-
-  const DEFAULT_LINE: Record<string, number> = {
-    points: 20,
-    rebounds: 6,
-    assists: 5,
-    steals: 1,
-    blocks: 1,
-    turnovers: 2,
-    three_point_field_goals_made: 2,
-    field_goals_made: 7,
-    field_goals_attempted: 15,
-    free_throws_made: 4,
-    points_assists: 25,
-    points_rebounds: 25,
-    assists_rebounds: 10,
-    points_assists_rebounds: 30,
-  };
 
   const FLOORS = [
     { id: "70", label: "70% of L10", rate: 0.7 },
@@ -49,13 +17,14 @@
   const MIN_GAMES = 10;
 
   let stat = $state("points");
-  let line = $state(DEFAULT_LINE.points);
+  let line = $state(defaultLine("points"));
   let floorId = $state("70");
   let search = $state("");
   let rows = $state<BoardRow[]>([]);
   let loading = $state(false);
   let boardError = $state<string | null>(null);
   let requestId = 0;
+  let boardKey = "";
   let synced = $derived((currentStatus()?.games ?? 0) > 0);
   let floor = $derived(FLOORS.find((item) => item.id === floorId) ?? FLOORS[0]);
   let shown = $derived.by(() => {
@@ -81,30 +50,36 @@
       minGames: MIN_GAMES,
       line: mark,
     };
-    const id = ++requestId;
-    loading = true;
-    boardError = null;
-    loadBoard(query)
-      .then((next) => {
-        if (id !== requestId) return;
-        rows = next;
-      })
-      .catch((caught: unknown) => {
-        if (id !== requestId) return;
-        boardError = errorText(caught);
-      })
-      .finally(() => {
-        if (id === requestId) loading = false;
-      });
+    // A new season or stat asks right away. Typing the line waits for a pause.
+    const key = `${query.season}|${query.seasonType}|${query.stat}`;
+    const delay = key === boardKey ? INPUT_DELAY_MS : 0;
+    boardKey = key;
+    return later(() => {
+      const id = ++requestId;
+      loading = true;
+      boardError = null;
+      loadBoard(query)
+        .then((next) => {
+          if (id !== requestId) return;
+          rows = next;
+        })
+        .catch((caught: unknown) => {
+          if (id !== requestId) return;
+          boardError = errorText(caught);
+        })
+        .finally(() => {
+          if (id === requestId) loading = false;
+        });
+    }, delay);
   });
 
   function shortStat(id: string): string {
-    return SHORT[id] ?? id;
+    return statShort(id);
   }
 
   function pickStat(next: string) {
     stat = next;
-    line = DEFAULT_LINE[next] ?? 10;
+    line = defaultLine(next);
   }
 
   function openPlayer(playerId: number) {

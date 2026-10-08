@@ -1,0 +1,46 @@
+{
+  "stats": [
+    { "id": "points", "label": "Points", "short": "PTS", "defaultLine": 20 },
+    { "id": "rebounds", "label": "Rebounds", "short": "REB", "defaultLine": 6 },
+    { "id": "assists", "label": "Assists", "short": "AST", "defaultLine": 5 },
+    { "id": "steals", "label": "Steals", "short": "STL", "defaultLine": 1 },
+    { "id": "blocks", "label": "Blocks", "short": "BLK", "defaultLine": 1 },
+    { "id": "turnovers", "label": "Turnovers", "short": "TOV", "defaultLine": 2 },
+    { "id": "field_goals_made", "label": "Field Goals Made", "short": "FGM", "defaultLine": 7 },
+    { "id": "field_goals_attempted", "label": "Field Goals Attempted", "short": "FGA", "defaultLine": 15 },
+    { "id": "three_point_field_goals_made", "label": "Three Pointers Made", "short": "3PM", "defaultLine": 2 },
+    { "id": "free_throws_made", "label": "Free Throws Made", "short": "FTM", "defaultLine": 4 },
+    { "id": "points_assists", "label": "Points + Assists", "short": "P+A", "defaultLine": 25, "parts": "points and assists" },
+    { "id": "points_rebounds", "label": "Points + Rebounds", "short": "P+R", "defaultLine": 25, "parts": "points and rebounds" },
+    { "id": "assists_rebounds", "label": "Assists + Rebounds", "short": "R+A", "defaultLine": 10, "parts": "assists and rebounds" },
+    {
+      "id": "points_assists_rebounds",
+      "label": "Points + Assists + Rebounds",
+      "short": "PRA",
+      "defaultLine": 30,
+      "parts": "points, rebounds, and assists"
+    }
+  ],
+  "chipOrder": [
+    "points",
+    "rebounds",
+    "assists",
+    "three_point_field_goals_made",
+    "points_assists_rebounds",
+    "points_rebounds",
+    "points_assists",
+    "assists_rebounds",
+    "steals",
+    "blocks",
+    "turnovers",
+    "field_goals_made",
+    "field_goals_attempted",
+    "free_throws_made"
+  ],
+  "windows": [
+    { "id": "last_5", "label": "Last 5 games", "short": "L5" },
+    { "id": "last_10", "label": "Last 10 games", "short": "L10" },
+    { "id": "last_20", "label": "Last 20 games", "short": "L20" },
+    { "id": "season", "label": "This season", "short": "Season" }
+  ]
+}
