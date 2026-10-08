@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{DraftPick, GameLog, PlayerOption, RosterEntry, SeasonStatus, SyncReport, TeamSource};
+use crate::models::{DraftPick, GameLog, PlayerOption, PlayoffSeriesGame, RosterEntry, SeasonStatus, SyncReport, TeamSource};
 use crate::season;
 
 const SCHEMA: &str = "
@@ -59,6 +59,16 @@ CREATE TABLE IF NOT EXISTS playoff_teams (
     team_abbr TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (season, team_abbr)
+);
+
+CREATE TABLE IF NOT EXISTS playoff_series_games (
+    season TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    series_id TEXT NOT NULL,
+    home_team TEXT NOT NULL,
+    visitor_team TEXT NOT NULL,
+    game_num INTEGER NOT NULL,
+    PRIMARY KEY (season, game_id)
 );
 
 CREATE TABLE IF NOT EXISTS draft_picks (
@@ -392,22 +402,63 @@ pub fn merge_players(
 }
 
 /// Playoff teams for the list: teams that have playoff games when any exist, else the
-/// stored standings field. None means leave the list unfiltered.
+/// stored standings field. Teams with four losses in a series are dropped. None means
+/// leave the list unfiltered.
 pub fn playoff_team_filter(
     connection: &Connection,
     season: &str,
     season_type: &str,
 ) -> AppResult<Option<HashSet<String>>> {
     let from_games = teams_in_games(connection, season, season_type)?;
-    if !from_games.is_empty() {
-        return Ok(Some(from_games));
-    }
-    let stored = playoff_teams(connection, season)?;
-    if stored.is_empty() {
-        Ok(None)
+    let mut teams = if !from_games.is_empty() {
+        from_games
     } else {
-        Ok(Some(stored.into_iter().collect()))
+        let stored = playoff_teams(connection, season)?;
+        if stored.is_empty() {
+            return Ok(None);
+        }
+        stored.into_iter().collect()
+    };
+    for team in eliminated_playoff_teams(connection, season)? {
+        teams.remove(&team);
     }
+    Ok(Some(teams))
+}
+
+/// Teams that have lost four games in any stored playoff series (best-of-seven elimination).
+pub fn eliminated_playoff_teams(connection: &Connection, season: &str) -> AppResult<HashSet<String>> {
+    let series = playoff_series_games(connection, season)?;
+    if series.is_empty() {
+        return Ok(HashSet::new());
+    }
+    let mut by_series: HashMap<String, Vec<&PlayoffSeriesGame>> = HashMap::new();
+    for game in &series {
+        by_series.entry(game.series_id.clone()).or_default().push(game);
+    }
+    let mut eliminated = HashSet::new();
+    for games in by_series.values() {
+        let ids: HashSet<&str> = games.iter().map(|game| game.game_id.as_str()).collect();
+        let mut losses: HashMap<String, usize> = HashMap::new();
+        let mut statement = connection.prepare(
+            "SELECT DISTINCT game_id, team_abbr FROM game_logs
+             WHERE season = ?1 AND season_type = 'Playoffs' AND wl = 'L'",
+        )?;
+        let rows = statement.query_map(params![season], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (game_id, team) = row?;
+            if ids.contains(game_id.as_str()) {
+                *losses.entry(team).or_default() += 1;
+            }
+        }
+        for (team, count) in losses {
+            if count >= 4 {
+                eliminated.insert(team);
+            }
+        }
+    }
+    Ok(eliminated)
 }
 
 fn teams_in_games(connection: &Connection, season: &str, season_type: &str) -> AppResult<HashSet<String>> {
@@ -488,6 +539,55 @@ pub fn playoff_teams(connection: &Connection, season: &str) -> AppResult<Vec<Str
         "SELECT team_abbr FROM playoff_teams WHERE season = ?1 ORDER BY team_abbr",
     )?;
     let rows = statement.query_map(params![season], |row| row.get(0))?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
+}
+
+/// Replaces the stored playoff series schedule. An empty answer keeps the old one.
+pub fn save_playoff_series(
+    connection: &Connection,
+    season: &str,
+    games: &[PlayoffSeriesGame],
+) -> AppResult<Option<usize>> {
+    if games.is_empty() {
+        return Ok(None);
+    }
+    let transaction = connection.unchecked_transaction()?;
+    transaction.execute("DELETE FROM playoff_series_games WHERE season = ?1", params![season])?;
+    {
+        let mut statement = transaction.prepare(
+            "INSERT OR REPLACE INTO playoff_series_games
+             (season, game_id, series_id, home_team, visitor_team, game_num)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        )?;
+        for game in games {
+            statement.execute(params![
+                season,
+                game.game_id,
+                game.series_id,
+                game.home_team,
+                game.visitor_team,
+                game.game_num
+            ])?;
+        }
+    }
+    transaction.commit()?;
+    Ok(Some(games.len()))
+}
+
+pub fn playoff_series_games(connection: &Connection, season: &str) -> AppResult<Vec<PlayoffSeriesGame>> {
+    let mut statement = connection.prepare(
+        "SELECT game_id, series_id, home_team, visitor_team, game_num
+         FROM playoff_series_games WHERE season = ?1 ORDER BY series_id, game_num",
+    )?;
+    let rows = statement.query_map(params![season], |row| {
+        Ok(PlayoffSeriesGame {
+            game_id: row.get(0)?,
+            series_id: row.get(1)?,
+            home_team: row.get(2)?,
+            visitor_team: row.get(3)?,
+            game_num: row.get(4)?,
+        })
+    })?;
     rows.collect::<Result<Vec<_>, _>>().map_err(AppError::from)
 }
 
@@ -785,6 +885,50 @@ mod tests {
         let from_games = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
         assert_eq!(from_games.len(), 1);
         assert_eq!(from_games[0].team, "MIN");
+    }
+
+    #[test]
+    fn eliminated_team_drops_out_of_the_playoff_list() {
+        let connection = open_memory().unwrap();
+        merge_logs(
+            &connection,
+            "2025-26",
+            "Regular Season",
+            &[
+                sample(7, "A Player", "MIN", "2025-10-22", 25),
+                sample(8, "B Player", "BOS", "2025-10-22", 18),
+            ],
+        )
+        .unwrap();
+        save_playoff_teams(&connection, "2025-26", &["MIN".into(), "BOS".into()]).unwrap();
+        let series: Vec<PlayoffSeriesGame> = (1..=7)
+            .map(|num| PlayoffSeriesGame {
+                game_id: format!("004250010{num}"),
+                series_id: "004250010".into(),
+                home_team: "MIN".into(),
+                visitor_team: "BOS".into(),
+                game_num: num,
+            })
+            .collect();
+        save_playoff_series(&connection, "2025-26", &series).unwrap();
+        // BOS takes four losses; MIN wins the series 4-0.
+        let mut playoff = Vec::new();
+        for num in 1..=4 {
+            let date = format!("2026-04-1{num}");
+            let mut winner = sample(7, "A Player", "MIN", &date, 30);
+            winner.game_id = format!("004250010{num}");
+            winner.wl = "W".into();
+            let mut loser = sample(8, "B Player", "BOS", &date, 20);
+            loser.game_id = format!("004250010{num}");
+            loser.wl = "L".into();
+            playoff.push(winner);
+            playoff.push(loser);
+        }
+        merge_logs(&connection, "2025-26", "Playoffs", &playoff).unwrap();
+        let listed = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].team, "MIN");
+        assert!(eliminated_playoff_teams(&connection, "2025-26").unwrap().contains("BOS"));
     }
 
     #[test]

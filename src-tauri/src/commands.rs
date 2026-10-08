@@ -12,7 +12,7 @@ use crate::engine::{self, Fitted, ModelSpec};
 use crate::error::AppError;
 use crate::models::{
     BoardQuery, BoardRow, Bootstrap, CatalogItem, GameLog, PlayerOption, PredictQuery, Prediction,
-    RosterEntry, SeasonStatus, Stat, SyncReport, TrainQuery, TrainReport, TrainStatReport, TrendQuery,
+    PlayoffSeriesGame, RosterEntry, SeasonStatus, Stat, SyncReport, TrainQuery, TrainReport, TrainStatReport, TrendQuery,
     TrendReport, Window,
 };
 use crate::nba::NbaClient;
@@ -20,7 +20,7 @@ use crate::season::{self, SEASON_TYPES};
 use crate::stats;
 
 pub struct AppState {
-    pub db: Mutex<Connection>,
+    pub db: Arc<Mutex<Connection>>,
     pub nba: NbaClient,
     pub syncing: AtomicBool,
     /// Held for a whole fit, so a second train from any page is turned away.
@@ -106,18 +106,31 @@ fn lock_db(db: &Mutex<Connection>) -> Result<MutexGuard<'_, Connection>, String>
         .map_err(|_| "the local database lock was poisoned".to_string())
 }
 
+/// Runs SQLite work off Tauri's main thread so the window stays responsive.
+async fn read_db<T, F>(db: Arc<Mutex<Connection>>, work: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || {
+        let connection = lock_db(db.as_ref())?;
+        work(&connection)
+    })
+    .await
+    .map_err(|error| format!("a database read stopped: {error}"))?
+}
+
+
 fn show(error: AppError) -> String {
     error.to_string()
 }
 
 #[tauri::command]
-pub fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
+pub async fn bootstrap(state: State<'_, AppState>) -> Result<Bootstrap, String> {
     let today = Local::now().date_naive();
     let suggested = season::suggested_season(today);
-    let stored = {
-        let connection = lock_db(&state.db)?;
-        db::statuses(&connection).map_err(show)?
-    };
+    let db = Arc::clone(&state.db);
+    let stored = read_db(db, |connection| db::statuses(connection).map_err(show)).await?;
     let mut seasons = Vec::new();
     for start in season::season_starts(today) {
         let label = season::format_season(start);
@@ -179,12 +192,16 @@ pub async fn sync_season(
     } else {
         None
     };
-    let playoff_teams = if season_type == "Playoffs" {
-        state.nba.playoff_teams(&season).await.ok()
+    let (playoff_teams, playoff_series) = if season_type == "Playoffs" {
+        (
+            state.nba.playoff_teams(&season).await.ok(),
+            state.nba.playoff_series(&season).await.ok(),
+        )
     } else {
-        None
+        (None, None)
     };
-    let connection = lock_db(&state.db)?;
+    // Network is done. One short lock writes the cache, roster, and playoff field.
+    let connection = lock_db(state.db.as_ref())?;
     finish_sync(
         &connection,
         &season,
@@ -192,6 +209,7 @@ pub async fn sync_season(
         &games,
         roster.as_deref(),
         playoff_teams.as_deref(),
+        playoff_series.as_deref(),
     )
 }
 
@@ -210,6 +228,7 @@ fn finish_sync(
     games: &[GameLog],
     roster: Option<&[RosterEntry]>,
     playoff_teams: Option<&[String]>,
+    playoff_series: Option<&[PlayoffSeriesGame]>,
 ) -> Result<SyncReport, String> {
     let mut report = db::merge_logs(connection, season, season_type, games).map_err(show)?;
     if let Some(entries) = roster {
@@ -217,6 +236,9 @@ fn finish_sync(
     }
     if let Some(teams) = playoff_teams {
         report.playoff_teams = db::save_playoff_teams(connection, season, teams).map_err(show)?;
+    }
+    if let Some(series) = playoff_series {
+        let _ = db::save_playoff_series(connection, season, series).map_err(show)?;
     }
     if season_type == "Playoffs" {
         let filtered = db::playoff_team_filter(connection, season, season_type).map_err(show)?;
@@ -232,7 +254,7 @@ fn finish_sync(
 }
 
 #[tauri::command]
-pub fn players(
+pub async fn players(
     state: State<'_, AppState>,
     season: String,
     season_type: String,
@@ -240,13 +262,16 @@ pub fn players(
 ) -> Result<Vec<PlayerOption>, String> {
     let season = season::validate_season(&season).map_err(show)?;
     let season_type = season::validate_season_type(&season_type).map_err(show)?;
-    let connection = lock_db(&state.db)?;
-    // Always go through list_players so a stored roster and the playoff field apply.
-    db::list_players(&connection, &season, &season_type, carry.unwrap_or(false)).map_err(show)
+    let carry = carry.unwrap_or(false);
+    let db = Arc::clone(&state.db);
+    read_db(db, move |connection| {
+        db::list_players(connection, &season, &season_type, carry).map_err(show)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendReport, String> {
+pub async fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendReport, String> {
     let season = season::validate_season(&query.season).map_err(show)?;
     let season_type = season::validate_season_type(&query.season_type).map_err(show)?;
     let stat = Stat::parse(&query.stat)
@@ -256,29 +281,26 @@ pub fn trend(state: State<'_, AppState>, query: TrendQuery) -> Result<TrendRepor
     if !query.line.is_finite() || query.line < 0.0 {
         return Err("The line has to be a number that is zero or greater.".to_string());
     }
-    let connection = lock_db(&state.db)?;
-    let games = db::player_games(&connection, &season, &season_type, query.player_id).map_err(show)?;
-    if games.is_empty() {
-        return no_games_trend(&connection, &season, &season_type, query.player_id, stat, window, query.line);
-    }
-    let mut report = stats::trend_report(
-        &games,
-        stat,
-        window,
-        query.line,
-        &season,
-        &season_type,
-    );
-    // A stored roster may have moved his team or marked him off-roster.
-    if let Some(player) = db::list_players(&connection, &season, &season_type, true)
-        .map_err(show)?
-        .into_iter()
-        .find(|player| player.player_id == query.player_id)
-    {
-        report.team = player.team;
-        report.team_source = player.team_source;
-    }
-    Ok(report)
+    let db = Arc::clone(&state.db);
+    let player_id = query.player_id;
+    let line = query.line;
+    read_db(db, move |connection| {
+        let games = db::player_games(connection, &season, &season_type, player_id).map_err(show)?;
+        if games.is_empty() {
+            return no_games_trend(connection, &season, &season_type, player_id, stat, window, line);
+        }
+        let mut report = stats::trend_report(&games, stat, window, line, &season, &season_type);
+        if let Some(player) = db::list_players(connection, &season, &season_type, true)
+            .map_err(show)?
+            .into_iter()
+            .find(|player| player.player_id == player_id)
+        {
+            report.team = player.team;
+            report.team_source = player.team_source;
+        }
+        Ok(report)
+    })
+    .await
 }
 
 /// A listed player with no game this season gets empty windows and his carried season.
@@ -317,7 +339,7 @@ fn no_games_trend(
 }
 
 #[tauri::command]
-pub fn leaderboard(state: State<'_, AppState>, query: BoardQuery) -> Result<Vec<BoardRow>, String> {
+pub async fn leaderboard(state: State<'_, AppState>, query: BoardQuery) -> Result<Vec<BoardRow>, String> {
     let season = season::validate_season(&query.season).map_err(show)?;
     let season_type = season::validate_season_type(&query.season_type).map_err(show)?;
     let stat = Stat::parse(&query.stat)
@@ -325,29 +347,38 @@ pub fn leaderboard(state: State<'_, AppState>, query: BoardQuery) -> Result<Vec<
     if !query.line.is_finite() || query.line < 0.0 {
         return Err("The line has to be a number that is zero or greater.".to_string());
     }
-    let connection = lock_db(&state.db)?;
-    let games = db::season_games(&connection, &season, &season_type).map_err(show)?;
-    let mut rows = stats::leaderboard(&games, stat, query.min_games, query.line);
-    // Waived players stay on the player page but drop out of the board when a roster is stored.
-    let on_roster = db::roster_player_ids(&connection, &season).map_err(show)?;
-    if !on_roster.is_empty() {
-        rows.retain(|row| on_roster.contains(&row.player_id));
-    }
-    Ok(rows)
+    let db = Arc::clone(&state.db);
+    let min_games = query.min_games;
+    let line = query.line;
+    read_db(db, move |connection| {
+        let games = db::season_games(connection, &season, &season_type).map_err(show)?;
+        let mut rows = stats::leaderboard(&games, stat, min_games, line);
+        let on_roster = db::roster_player_ids(connection, &season).map_err(show)?;
+        if !on_roster.is_empty() {
+            rows.retain(|row| on_roster.contains(&row.player_id));
+        }
+        Ok(rows)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn model_scores(
+pub async fn model_scores(
     state: State<'_, AppState>,
     query: TrainQuery,
 ) -> Result<Vec<TrainStatReport>, String> {
     let season = season::validate_season(&query.season).map_err(show)?;
     let season_type = season::validate_season_type(&query.season_type).map_err(show)?;
-    let state = state.inner();
-    Ok(Stat::all()
-        .iter()
-        .map(|stat| score_stat(&state.models_dir, &state.spec_dirs, *stat, &season, &season_type))
-        .collect())
+    let models_dir = state.models_dir.clone();
+    let spec_dirs = state.spec_dirs.clone();
+    tokio::task::spawn_blocking(move || {
+        Ok(Stat::all()
+            .iter()
+            .map(|stat| score_stat(&models_dir, &spec_dirs, *stat, &season, &season_type))
+            .collect())
+    })
+    .await
+    .map_err(|error| format!("model scores stopped: {error}"))?
 }
 
 #[tauri::command]
@@ -360,11 +391,11 @@ pub async fn train_models(
     let state = state.inner();
     let _guard = enter(&state.training, "A fit is already running. Wait for it to finish.")?;
     let games = {
-        let connection = lock_db(&state.db)?;
+        let connection = lock_db(state.db.as_ref())?;
         db::season_games(&connection, &season, &season_type).map_err(show)?
     };
     let (seed, seed_note) = if query.seed {
-        let connection = lock_db(&state.db)?;
+        let connection = lock_db(state.db.as_ref())?;
         seed_games(&connection, &season, &season_type)?
     } else {
         (None, None)
@@ -424,7 +455,7 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
     let state = state.inner();
     // The spot only needs this player's history, so skip the rest of the league.
     let games = {
-        let connection = lock_db(&state.db)?;
+        let connection = lock_db(state.db.as_ref())?;
         db::player_games(&connection, &season, &season_type, query.player_id).map_err(show)?
     };
     // No games this season is fine: a carried player is priced from the prior, and the
@@ -809,10 +840,13 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
     } else {
         None
     };
-    let playoff_teams = if season_type == "Playoffs" {
-        runtime.block_on(client.playoff_teams(&season)).ok()
+    let (playoff_teams, playoff_series) = if season_type == "Playoffs" {
+        (
+            runtime.block_on(client.playoff_teams(&season)).ok(),
+            runtime.block_on(client.playoff_series(&season)).ok(),
+        )
     } else {
-        None
+        (None, None)
     };
     let connection = db::open(db_path).map_err(show)?;
     finish_sync(
@@ -822,6 +856,7 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
         &games,
         roster.as_deref(),
         playoff_teams.as_deref(),
+        playoff_series.as_deref(),
     )
 }
 
@@ -832,7 +867,7 @@ pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, 
         eprintln!("could not move the old model files: {error}");
     }
     Ok(AppState {
-        db: Mutex::new(connection),
+        db: Arc::new(Mutex::new(connection)),
         nba: NbaClient::new()?,
         syncing: AtomicBool::new(false),
         training: AtomicBool::new(false),
@@ -875,7 +910,7 @@ mod tests {
         let connection = db::open_memory().unwrap();
         db::merge_logs(&connection, "2024-25", "Regular Season", &[log(7, "DEN", "2025-03-01", 22)]).unwrap();
         // Opening night: no games yet, and the roster call failed.
-        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], None, None).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], None, None, None).unwrap();
         assert!(report.warning.is_some());
         assert_eq!(report.roster_players, None);
         let player = db::list_players(&connection, "2025-26", "Regular Season", true).unwrap();
@@ -890,7 +925,7 @@ mod tests {
             .map(|id| RosterEntry { player_id: id, name: format!("P{id}"), team_abbr: "UTA".to_string() })
             .collect();
         roster.push(RosterEntry { player_id: 7, name: "P7".to_string(), team_abbr: "OKC".to_string() });
-        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], Some(&roster), None).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Regular Season", &[], Some(&roster), None, None).unwrap();
         assert_eq!(report.roster_players, Some(401));
         let player = db::list_players(&connection, "2025-26", "Regular Season", true).unwrap();
         let seven = player.iter().find(|player| player.player_id == 7).unwrap();
@@ -902,7 +937,7 @@ mod tests {
     fn playoff_sync_without_a_field_leaves_a_visible_note() {
         let connection = db::open_memory().unwrap();
         db::merge_logs(&connection, "2025-26", "Regular Season", &[log(7, "MIN", "2025-11-01", 20)]).unwrap();
-        let report = finish_sync(&connection, "2025-26", "Playoffs", &[], None, None).unwrap();
+        let report = finish_sync(&connection, "2025-26", "Playoffs", &[], None, None, None).unwrap();
         assert!(report.warning.as_deref().unwrap_or("").contains("Playoff teams are not filtered"));
         assert_eq!(report.playoff_teams, None);
         // A standings answer stores the field and clears the need for that note.
@@ -913,6 +948,7 @@ mod tests {
             &[],
             None,
             Some(&["MIN".into(), "BOS".into()]),
+            None,
         )
         .unwrap();
         assert_eq!(report.playoff_teams, Some(2));
@@ -950,6 +986,53 @@ mod tests {
         rows.retain(|row| on_roster.contains(&row.player_id));
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].player_id, 8);
+    }
+
+    #[test]
+    fn a_read_is_not_blocked_by_a_sync_waiting_on_the_network() {
+        use std::sync::Barrier;
+        use std::time::{Duration, Instant};
+
+        let db = Arc::new(Mutex::new(db::open_memory().unwrap()));
+        {
+            let connection = db.lock().unwrap();
+            db::merge_logs(&connection, "2025-26", "Regular Season", &[log(7, "MIN", "2025-11-01", 22)])
+                .unwrap();
+        }
+        let barrier = Arc::new(Barrier::new(2));
+        let syncing = Arc::new(AtomicBool::new(false));
+
+        let db_sync = Arc::clone(&db);
+        let barrier_sync = Arc::clone(&barrier);
+        let syncing_sync = Arc::clone(&syncing);
+        let sync_thread = std::thread::spawn(move || {
+            // Same shape as sync_season: take the flag, wait on the network, then lock.
+            assert!(syncing_sync
+                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok());
+            barrier_sync.wait();
+            std::thread::sleep(Duration::from_millis(250));
+            let _connection = lock_db(db_sync.as_ref()).unwrap();
+            syncing_sync.store(false, Ordering::SeqCst);
+        });
+
+        let db_read = Arc::clone(&db);
+        let barrier_read = Arc::clone(&barrier);
+        let read_thread = std::thread::spawn(move || {
+            barrier_read.wait();
+            let started = Instant::now();
+            let connection = lock_db(db_read.as_ref()).unwrap();
+            let listed = db::list_players(&connection, "2025-26", "Regular Season", false).unwrap();
+            let elapsed = started.elapsed();
+            assert_eq!(listed.len(), 1);
+            assert!(
+                elapsed < Duration::from_millis(100),
+                "read waited {elapsed:?}; the sync still held the database during the network wait"
+            );
+        });
+
+        sync_thread.join().unwrap();
+        read_thread.join().unwrap();
     }
 
     #[test]

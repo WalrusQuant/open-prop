@@ -311,6 +311,16 @@ impl RookieBucket {
     }
 }
 
+/// One scheduled game in a playoff series, from `commonplayoffseries`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlayoffSeriesGame {
+    pub game_id: String,
+    pub series_id: String,
+    pub home_team: String,
+    pub visitor_team: String,
+    pub game_num: i32,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrendQuery {

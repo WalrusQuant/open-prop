@@ -94,6 +94,8 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player is priced at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
 - [x] Playoff list. Syncing Playoffs stores `leaguestandingsv3` clinch/play-in teams; once playoff games exist those teams win. Fallback is the wide list plus a sync note.
 - [x] Mid-season roster. Every sync of the roster season refreshes `commonallplayers`. Roster overrides team and board membership; waived players stay labelled "Not on a roster".
+- [x] Mid-playoff elimination. `commonplayoffseries` plus four losses in a series drops the team from the playoff list.
+- [x] Read commands run off the UI thread (`spawn_blocking`); sync fetches before it locks the database.
 - [x] Rookie prior from draft position: backtested on `rookie-prior`; **not shipped** (draft×role lost to role prior). Five-game wait stays. `sync-draft` + `backtest-rookie` available.
 - [x] League drift: backtested; **not shipped** (mixed/tiny).
 - [ ] Clicked through in the browser preview only, not in the Tauri webview.
