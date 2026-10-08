@@ -8,7 +8,15 @@ The app is a [Tauri](https://tauri.app/) shell. Rust owns the cache, the sync, a
 
 ## Screens
 
+### Home
+
+![Home tab. The cache, the fitted models, and the player search.](docs/home.png)
+
 Home is the cache and the models. It shows how many games are stored, when they were synced, and when each stat was last fit. Sync and refit live here. Open a stat for that model's priors and its holdout test, or open a player.
+
+### Player
+
+![Player tab. One player, the number, the model, and the trend.](docs/player.png)
 
 The player page is one player and one stat. You set the number being checked. Last 5, last 10, last 20, and the season are scored against that same number. The model card is the chance of that many or more for a spot you name: opponent, home or away, days of rest, and minutes. Leave the opponent blank for a league-average opponent. Leave minutes blank and the model uses a minutes distribution. Type minutes and that distribution collapses to the number you typed. The distribution chart draws the model's probabilities from zero up, next to the games in the selected window. Changing the number sums a tail that is already on the page. It does not ask the model again. Changing the player, the stat, the window, or the spot does.
 
