@@ -1237,6 +1237,33 @@ mod tests {
     }
 
     #[test]
+    fn one_players_games_predict_the_same_as_the_whole_league() {
+        let mut games = Vec::new();
+        for player in 1..6 {
+            for day in 0..24 {
+                let mut row = game(day * 2 + player % 2, day % 2 == 0, 10 + (player as i32) * 3 + (day as i32 % 5));
+                row.player_id = player;
+                row.player_name = format!("P{player}");
+                games.push(row);
+            }
+        }
+        let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();
+        let spot = Spot {
+            player_id: 3,
+            opponent: Some("BOS".to_string()),
+            home: false,
+            rest_days: 1.0,
+            minutes: None,
+        };
+        let mine: Vec<GameLog> = games.iter().filter(|row| row.player_id == 3).cloned().collect();
+        let league = predict_spot(&fitted, &games, &spot, "last_10", 18.5).unwrap();
+        let alone = predict_spot(&fitted, &mine, &spot, "last_10", 18.5).unwrap();
+        assert!((league.mean - alone.mean).abs() < 1e-12, "{} {}", league.mean, alone.mean);
+        assert!((league.clear_probability - alone.clear_probability).abs() < 1e-12);
+        assert_eq!(league.shift_probability, alone.shift_probability);
+    }
+
+    #[test]
     fn a_failed_save_leaves_the_old_model_loadable() {
         let games: Vec<GameLog> = (0..36).map(|day| game(day * 2, true, 18)).collect();
         let fitted = train_one(&games, &spec(0.08), "2025-26", "Regular Season").unwrap();

@@ -289,12 +289,15 @@ pub async fn predict(state: State<'_, AppState>, query: PredictQuery) -> Result<
         return Err("The line has to be a number that is zero or greater.".to_string());
     }
     let state = state.inner();
+    // The spot only needs this player's history, so skip the rest of the league.
     let games = {
         let connection = lock_db(&state.db)?;
-        db::season_games(&connection, &season, &season_type).map_err(show)?
+        db::player_games(&connection, &season, &season_type, query.player_id).map_err(show)?
     };
     if games.is_empty() {
-        return Err("No cached games for that season. Sync it, then train.".to_string());
+        return Err(
+            "No cached games for that player. Sync this season, then try the name again.".to_string(),
+        );
     }
     let key = format!("{season}|{season_type}|{}", stat.id());
     let (generation, cached) = state.fitted.get(&key)?;

@@ -7,6 +7,7 @@
   import "@fontsource/ibm-plex-mono/latin-500.css";
   import { page } from "$app/stores";
   import { onMount } from "svelte";
+  import { errorText } from "$lib/api";
   import { formatWhen } from "$lib/format";
   import {
     currentStatus,
@@ -25,7 +26,8 @@
     initTheme();
     openDesk()
       .catch((caught: unknown) => {
-        bootError = caught instanceof Error ? caught.message : "The cache could not be opened.";
+        // Tauri rejects with the Rust error string, not an Error.
+        bootError = errorText(caught) || "The cache could not be opened.";
       })
       .finally(() => {
         booting = false;
