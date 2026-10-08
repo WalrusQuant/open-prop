@@ -3,6 +3,7 @@
   import PlayerSearch from "$lib/components/PlayerSearch.svelte";
   import { errorText, inTauri, loadModelScores, loadPlayers, trainModels } from "$lib/api";
   import { formatWhen } from "$lib/format";
+  import { seedLabel, seedSource } from "$lib/season";
   import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
   import type { PlayerOption, TrainStatReport } from "$lib/types";
 
@@ -14,6 +15,15 @@
 
   let status = $derived(currentStatus());
   let cached = $derived((status?.games ?? 0) > 0);
+  let seedNote = $state<string | null>(null);
+  let source = $derived(seedSource(session.season, session.seasonType));
+  let sourceCached = $derived(
+    source != null &&
+      session.seasons.some(
+        (item) => item.season === source.season && item.seasonType === source.seasonType && item.games > 0,
+      ),
+  );
+  let sourceName = $derived(source ? `${source.season} ${source.seasonType}` : "");
 
   $effect(() => {
     desktop = inTauri();
@@ -87,11 +97,15 @@
     if (!desktop || session.training) return;
     session.training = true;
     loadError = null;
+    seedNote = null;
     const season = session.season;
     const seasonType = session.seasonType;
     try {
-      const report = await trainModels({ season, seasonType });
-      if (season === session.season && seasonType === session.seasonType) rows = report.stats;
+      const report = await trainModels({ season, seasonType, seed: session.seed });
+      if (season === session.season && seasonType === session.seasonType) {
+        rows = report.stats;
+        seedNote = report.seedNote;
+      }
     } catch (caught: unknown) {
       loadError = errorText(caught);
     } finally {
@@ -151,8 +165,30 @@
     </button>
   </div>
 
+  {#if source}
+    <label class="carry">
+      {#if sourceCached}
+        <input type="checkbox" bind:checked={session.seed} disabled={session.training} />
+      {:else}
+        <input type="checkbox" checked={false} disabled />
+      {/if}
+      Carry last season
+      <span>
+        {#if !sourceCached}
+          Sync {sourceName} to start each player from it.
+        {:else if session.seed}
+          Each player starts from his {sourceName}.
+        {:else}
+          Every player starts from his minutes role.
+        {/if}
+      </span>
+    </label>
+  {/if}
   {#if session.training}
     <p class="sync-note">Refitting all 14 stats.</p>
+  {/if}
+  {#if seedNote}
+    <p class="banner">{seedNote}</p>
   {/if}
   {#if stale}
     <p class="banner">The cache is newer than at least one fit. Refit so the models see the new games.</p>
@@ -182,6 +218,9 @@
               <span class="proof">
                 Holdout {number(row.holdoutMae)} · last 10 {number(row.baselineMae)}
               </span>
+              {#if row.seededFrom}
+                <span class="when">Carried {seedLabel(row.seededFrom)}</span>
+              {/if}
             {/if}
           </a>
         </li>

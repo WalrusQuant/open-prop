@@ -78,13 +78,25 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     The last 20% of dates are held out. The saved model is the one that did not see those dates, so
     the error on the model page is the error of the model you are looking at. That error sits next
     to the player's last-10 total on the same games. If the average was closer, both numbers still
-    show. A prediction still waits until the player has five cached games. There is no odds feed
-    and no edge against a book.
+    show. There is no odds feed and no edge against a book.
+  </p>
+  <p>
+    A season starts from the one before it when that season is cached. Playoffs start from their
+    regular season. Each player's rate prior adds his own totals from last season, adjusted for the
+    opponents, home, and rest, and capped at 1,000 pseudo-minutes. A starter's own games outweigh
+    that after about 30 games, and until then the player page says "Prior from" that season. His
+    minutes start from last season's average, counted as three games. Each opponent multiplier
+    starts from last season's, pulled toward 1. A rookie keeps the role prior. A traded player keeps
+    his own carry, because the multipliers belong to opponents, not teammates. A player with carry
+    can be priced after his first game. Everyone else waits for five. The cap came from a backtest
+    on the first 10 team games of the last two seasons, where every game was predicted from earlier
+    games only. Untick "Carry last season" on the home page to fit without it.
   </p>
   <p>
     The spec for each stat is <code>models/specs</code> in the source tree: prior minutes, opponent
-    shrinkage, the shift prior, the role cuts, and the home and rest priors. An edit takes effect
-    the next time you train. Training needs at least 20 rows after the holdout. Fitted models stay
+    shrinkage, the shift prior, the role cuts, the home and rest priors, and the two carry caps. An edit takes effect
+    the next time you train. Training needs at least 20 rows after the holdout, unless it carries
+    last season. Fitted models stay
     in the app data folder. They are not part of the source tree. A file saved by the old tree
     model will not load. Refit the season on the home page. There is no schedule feed. The
     opponent, the site, the rest, and the minutes are the spot you name. Training runs in the

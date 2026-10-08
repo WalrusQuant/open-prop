@@ -79,3 +79,17 @@ From the October code review. Branch `review-fixes-2026-10`.
 
 `cargo test --lib`: 45 passed, 1 ignored. vitest: 19 passed. `pnpm check`: 0 errors. `pnpm build` clean. Checked in the browser preview, not in the Tauri webview.
 
+## Last-season prior (October 2026)
+
+Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-prior.md`](plan-cross-season-prior.md).
+
+- [x] Each player's rate prior adds his own last season, capped at `carry_minutes` (1000) adjusted pseudo-minutes. Playoffs carry their regular season. Rookies keep the role prior. Traded players keep their carry.
+- [x] Opponent multipliers start from last season's, pulled toward 1 by `opponent_carry_minutes` (1500).
+- [x] Minutes start from last season's average and fade to the role as games come in.
+- [x] A seeded fit borrows last season's role rates, minutes, home, and rest until this season has 100 rows, and does not wait for 20 training rows. A player with carry is priced after one game.
+- [x] Home has a "Carry last season" checkbox. Cards, the model page, and the player page ("Prior from 2024-25") say when a fit carried a season.
+- [x] `sync-season` and `backtest-prior` bins. Backtest on the first 10 team games of 2024-25 and 2025-26.
+- [ ] A time decay on the rate carry. At the end of 2025-26 the carry is within 0.02 holdout MAE of no carry on points and PRA; a decay could close that.
+- [ ] Per-stat `carry_minutes`. Only points, rebounds, assists, threes, and PRA were backtested; the other nine use the same 1000.
+- [ ] Day one. A player with no game this season is not in the player list yet, so the first prediction is after his first game is synced.
+- [ ] Clicked through in the browser preview only, not in the Tauri webview.

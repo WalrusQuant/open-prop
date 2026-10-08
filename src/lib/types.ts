@@ -145,6 +145,8 @@ export interface BoardRow {
 export interface TrainQuery {
   season: string;
   seasonType: string;
+  /** Carry last season into the priors when it is cached. The app defaults to true. */
+  seed?: boolean;
 }
 
 export interface TrainStatReport {
@@ -163,12 +165,18 @@ export interface TrainStatReport {
   homeMultiplier: number | null;
   restPerDay: number | null;
   settingsStored: boolean;
+  /** "2024-25 Regular Season" when the fit carried that season. */
+  seededFrom: string | null;
+  carryMinutes: number | null;
+  opponentCarryMinutes: number | null;
 }
 
 export interface TrainReport {
   season: string;
   seasonType: string;
   stats: TrainStatReport[];
+  /** Set when a carry was asked for but its season is not cached. */
+  seedNote: string | null;
 }
 
 export interface PredictQuery {
@@ -200,4 +208,6 @@ export interface Prediction {
   holdoutCoverage: number | null;
   trainRows: number;
   holdoutRows: number;
+  /** Set while last season's carry outweighs this season's games. */
+  priorFrom: string | null;
 }

@@ -7,6 +7,8 @@ export const session = $state({
   syncing: false,
   /** Lives here, not on Home, so leaving the page does not re-enable Refit mid-fit. */
   training: false,
+  /** Carry last season into the next refit. Kept here so it survives a page change. */
+  seed: true,
   error: null as string | null,
   notice: null as string | null,
   warning: null as string | null,

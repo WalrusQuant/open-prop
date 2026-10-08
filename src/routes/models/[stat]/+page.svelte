@@ -131,6 +131,11 @@
       <div><dt>Prior minutes</dt><dd>{whole(row?.priorMinutes ?? null)}</dd></div>
       <div><dt>Opponent minutes</dt><dd>{whole(row?.opponentMinutes ?? null)}</dd></div>
       <div><dt>Shift prior</dt><dd>{number(row?.shiftPrior ?? null, 2)}</dd></div>
+      <div><dt>Carry minutes</dt><dd>{whole(row?.carryMinutes ?? null)}</dd></div>
+      <div><dt>Opponent carry</dt><dd>{whole(row?.opponentCarryMinutes ?? null)}</dd></div>
+      {#if row?.seededFrom}
+        <div><dt>Carried</dt><dd>{row.seededFrom}</dd></div>
+      {/if}
       {#if row?.homeMultiplier != null}
         <div><dt>Home</dt><dd>{times(row.homeMultiplier)}</dd></div>
       {/if}
@@ -148,6 +153,12 @@
         landed on. An agent can change the priors in <code>models/specs/{statId}.json</code> and refit.
       {:else}
         The spec lives in <code>models/specs/{statId}.json</code>. Refit on the home page to use it.
+      {/if}
+      {#if row?.seededFrom}
+        This fit started each player from his {row.seededFrom}, worth at most the carry minutes, and
+        each opponent from its multiplier there.
+      {:else if fitted}
+        This fit did not carry a season. Every player started from his minutes role.
       {/if}
     </p>
   </section>
