@@ -1,9 +1,5 @@
 mod bayes;
-#[cfg(test)]
-mod features;
 mod fit;
-#[cfg(test)]
-mod posterior;
 mod spec;
 
 pub use fit::{
