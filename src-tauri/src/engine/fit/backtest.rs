@@ -13,6 +13,7 @@ use super::{at_least, build_carry, combine, fit_parts, observations, parts_of, s
 pub struct Arm {
     pub carry_minutes: f64,
     pub opponent_carry_minutes: f64,
+    pub carry_decay_tau: f64,
 }
 
 /// Team game buckets the report splits on.
@@ -21,6 +22,8 @@ pub const BUCKETS: [(usize, usize); 3] = [(1, 3), (4, 6), (7, 10)];
 /// who played in the seed season, the game a carry prices on its own.
 pub const ALL_ROWS: usize = BUCKETS.len();
 pub const FIRST_GAME: usize = BUCKETS.len() + 1;
+/// Last 20% of distinct dates in the season (by calendar), for late-season decay checks.
+pub const LATE_SEASON: usize = BUCKETS.len() + 2;
 
 #[derive(Debug, Clone, Default)]
 pub struct Score {
@@ -190,6 +193,9 @@ pub fn run(
         .into_iter()
         .collect();
     dates.sort();
+    let mut all_dates: Vec<&str> = primary.iter().map(|row| row.date.as_str()).collect::<HashSet<_>>().into_iter().collect();
+    all_dates.sort();
+    let late_start = all_dates.get(all_dates.len() * 4 / 5).copied();
     let lines = lines_for(stat);
     let mut scores: BTreeMap<(usize, usize), Score> = BTreeMap::new();
     for date in dates {
@@ -205,6 +211,7 @@ pub fn run(
             let mut settings = spec.clone();
             settings.carry_minutes = arm.carry_minutes;
             settings.opponent_carry_minutes = arm.opponent_carry_minutes;
+            settings.carry_decay_tau = arm.carry_decay_tau;
             let parts = fit_parts(&histories, stat, &settings, &seeds[arm_index], Some(date))?;
             for index in &today {
                 let row = &primary[*index];
@@ -241,41 +248,42 @@ pub fn run(
                         .or_default()
                         .add(&forecast.pmf, actual, &lines, covered);
                 }
+                if late_start.is_some_and(|start| date >= start) {
+                    scores
+                        .entry((arm_index, LATE_SEASON))
+                        .or_default()
+                        .add(&forecast.pmf, actual, &lines, covered);
+                }
             }
         }
     }
     Ok(scores)
 }
 
-/// A markdown table per stat: log loss by bucket, then CRPS, Brier, and calibration over all rows,
-/// then the first game of each player with seed-season minutes (`p-g1`) on its own.
+/// A markdown table per stat: log loss by bucket, CRPS, first game, and late season.
 pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>) -> String {
     let mut text = format!(
-        "### {}\n\n| carry | opp carry | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL today rows | CRPS | Brier | ECE | rows | today | LL p-g1 | CRPS p-g1 | Brier p-g1 | ECE p-g1 | p-g1 rows |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "### {}\n\n| carry | opp | tau | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL late | CRPS | rows | LL p-g1 | p-g1 rows |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         stat.label()
     );
     for (arm_index, arm) in arms.iter().enumerate() {
         let cell = |bucket: usize| scores.get(&(arm_index, bucket)).cloned().unwrap_or_default();
         let all = cell(ALL_ROWS);
         let first = cell(FIRST_GAME);
+        let late = cell(LATE_SEASON);
         text.push_str(&format!(
-            "| {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.0}% | {:.4} | {:.4} | {:.4} | {:.4} | {} |\n",
+            "| {:.0} | {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.4} | {} |\n",
             arm.carry_minutes,
             arm.opponent_carry_minutes,
+            arm.carry_decay_tau,
             cell(0).mean_log_loss(),
             cell(1).mean_log_loss(),
             cell(2).mean_log_loss(),
             all.mean_log_loss(),
-            all.covered_log_loss(),
+            late.mean_log_loss(),
             all.mean_crps(),
-            all.mean_brier(),
-            all.calibration_error(),
             all.rows,
-            100.0 * all.covered_today as f64 / all.rows.max(1) as f64,
             first.mean_log_loss(),
-            first.mean_crps(),
-            first.mean_brier(),
-            first.calibration_error(),
             first.rows,
         ));
     }

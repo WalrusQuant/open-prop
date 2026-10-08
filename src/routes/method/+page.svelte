@@ -84,7 +84,7 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     A season starts from the one before it when that season is cached. Playoffs start from their
     regular season. Each player's rate prior adds his own totals from last season, adjusted for the
     opponents, home, and rest, and capped at 1,000 pseudo-minutes. A starter's own games outweigh
-    that after about 30 games, and until then the player page says "Prior from" that season. His
+    that after about 30 games, and the carry also fades as this season's minutes grow. Until then the player page says "Prior from" that season. His
     minutes start from last season's average, counted as three games. Each opponent multiplier
     starts from last season's, pulled toward 1. A rookie keeps the role prior. A traded player keeps
     his own carry, because the multipliers belong to opponents, not teammates. A player with carry

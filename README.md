@@ -136,8 +136,9 @@ Shipped values, same for every stat:
 | `role_minutes` | `[15, 28]` | Rising cuts, in minutes, that separate roles. | 1 to 4 cuts, each in (0, 48) |
 | `home_sd` | 0.08 | Prior standard deviation of the log home multiplier. | (0, 1] |
 | `rest_sd` | 0.015 | Prior standard deviation of the log rest multiplier, per day. | (0, 0.2] |
-| `carry_minutes` | 1000 | Most pseudo-minutes of last season in a player's rate prior. 0 turns the player carry off. | [0, 5000] |
+| `carry_minutes` | 1000 | Most pseudo-minutes of last season in a player's rate prior. 0 turns the player carry off. Every counting stat uses 1000 after a grid on 2024-25 and 2025-26; 500–2000 scored within ~0.001 LL. | [0, 5000] |
 | `opponent_carry_minutes` | 1500 | Pseudo-minutes that pull an opponent multiplier toward last season's. | [0, 20000] |
+| `carry_decay_tau` | 500 | Scale for `exp(-m/τ)` decay of the player carry as this season's minutes `m` grow. 0 turns decay off. Tuned on PTS and PRA over full seasons. | [0, 20000] |
 
 Training needs at least 20 rows after the holdout, unless the fit carries last season. A row is a game that already has five earlier games for that player. Games with zero minutes are skipped. The game being scored is not inside its own rate.
 
