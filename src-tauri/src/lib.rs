@@ -24,6 +24,21 @@ pub fn sync_cached(db_path: &Path, season: &str, season_type: &str) -> Result<Sy
 
 /// Scores the first `last_game` team games of `season` with each (carry, opponent carry) arm,
 /// seeded from `seed_season`'s regular season. Returns markdown tables.
+pub fn sync_draft_year(db_path: &Path, year: i32) -> Result<usize, String> {
+    commands::sync_draft_year(db_path, year)
+}
+
+pub fn backtest_rookie(
+    db_path: &Path,
+    season: &str,
+    history_seasons: &[String],
+    stats: &[String],
+    prior_minutes: &[f64],
+    last_game: usize,
+) -> Result<String, String> {
+    commands::backtest_rookie(db_path, season, history_seasons, stats, prior_minutes, last_game)
+}
+
 pub fn backtest_prior(
     db_path: &Path,
     season: &str,

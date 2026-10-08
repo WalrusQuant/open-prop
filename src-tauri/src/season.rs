@@ -79,6 +79,11 @@ pub fn seed_source(season: &str, season_type: &str) -> Option<(String, String)> 
     Some((format_season(start - 1), regular))
 }
 
+/// The calendar year of the draft that feeds this season's rookies (`2024` for `2024-25`).
+pub fn draft_year(season: &str) -> Option<i32> {
+    season_start_year(season)
+}
+
 fn season_start_year(value: &str) -> Option<i32> {
     let (start, end) = value.split_once('-')?;
     if start.len() != 4 || end.len() != 2 {

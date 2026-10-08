@@ -24,6 +24,14 @@ path = "src/bin/sync_season.rs"
 name = "backtest-prior"
 path = "src/bin/backtest_prior.rs"
 
+[[bin]]
+name = "backtest-rookie"
+path = "src/bin/backtest_rookie.rs"
+
+[[bin]]
+name = "sync-draft"
+path = "src/bin/sync_draft.rs"
+
 [build-dependencies]
 tauri-build = { version = "2.7", features = [] }
 

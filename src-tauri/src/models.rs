@@ -269,6 +269,48 @@ pub struct RosterEntry {
     pub team_abbr: String,
 }
 
+/// One selection from `drafthistory`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DraftPick {
+    pub player_id: i64,
+    pub name: String,
+    pub draft_year: i32,
+    pub round: i32,
+    pub overall_pick: i32,
+}
+
+/// Draft buckets for the rookie prior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RookieBucket {
+    LotteryTop,
+    LotteryRest,
+    FirstRoundLate,
+    SecondRound,
+    Undrafted,
+}
+
+impl RookieBucket {
+    pub fn from_overall(pick: Option<i32>) -> Self {
+        match pick {
+            Some(p) if p <= 5 => Self::LotteryTop,
+            Some(p) if p <= 14 => Self::LotteryRest,
+            Some(p) if p <= 30 => Self::FirstRoundLate,
+            Some(_) => Self::SecondRound,
+            None => Self::Undrafted,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::LotteryTop => "picks 1-5",
+            Self::LotteryRest => "picks 6-14",
+            Self::FirstRoundLate => "picks 15-30",
+            Self::SecondRound => "2nd round",
+            Self::Undrafted => "undrafted",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TrendQuery {

@@ -4,7 +4,7 @@ use chrono::Utc;
 use rusqlite::{params, Connection};
 
 use crate::error::{AppError, AppResult};
-use crate::models::{GameLog, PlayerOption, RosterEntry, SeasonStatus, SyncReport, TeamSource};
+use crate::models::{DraftPick, GameLog, PlayerOption, RosterEntry, SeasonStatus, SyncReport, TeamSource};
 use crate::season;
 
 const SCHEMA: &str = "
@@ -59,6 +59,15 @@ CREATE TABLE IF NOT EXISTS playoff_teams (
     team_abbr TEXT NOT NULL,
     fetched_at TEXT NOT NULL,
     PRIMARY KEY (season, team_abbr)
+);
+
+CREATE TABLE IF NOT EXISTS draft_picks (
+    draft_year INTEGER NOT NULL,
+    player_id INTEGER NOT NULL,
+    player_name TEXT NOT NULL,
+    round INTEGER NOT NULL,
+    overall_pick INTEGER NOT NULL,
+    PRIMARY KEY (draft_year, player_id)
 );
 ";
 
@@ -535,6 +544,78 @@ fn map_game(row: &rusqlite::Row<'_>) -> rusqlite::Result<GameLog> {
     })
 }
 
+
+/// Replaces one draft year's picks. Empty answers keep the cache.
+pub fn save_draft_picks(connection: &Connection, year: i32, picks: &[DraftPick]) -> AppResult<Option<usize>> {
+    if picks.is_empty() {
+        return Ok(None);
+    }
+    let tx = connection.unchecked_transaction()?;
+    tx.execute("DELETE FROM draft_picks WHERE draft_year = ?1", params![year])?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO draft_picks (draft_year, player_id, player_name, round, overall_pick)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for pick in picks {
+            insert.execute(params![
+                pick.draft_year,
+                pick.player_id,
+                pick.name,
+                pick.round,
+                pick.overall_pick,
+            ])?;
+        }
+    }
+    tx.commit()?;
+    Ok(Some(picks.len()))
+}
+
+pub fn draft_picks(connection: &Connection, year: i32) -> AppResult<Vec<DraftPick>> {
+    let mut statement = connection.prepare(
+        "SELECT player_id, player_name, draft_year, round, overall_pick
+         FROM draft_picks WHERE draft_year = ?1 ORDER BY overall_pick",
+    )?;
+    let rows = statement.query_map(params![year], |row| {
+        Ok(DraftPick {
+            player_id: row.get(0)?,
+            name: row.get(1)?,
+            draft_year: row.get(2)?,
+            round: row.get(3)?,
+            overall_pick: row.get(4)?,
+        })
+    })?;
+    let mut picks = Vec::new();
+    for row in rows {
+        picks.push(row?);
+    }
+    Ok(picks)
+}
+
+/// Every stored pick, keyed by player. Later draft years overwrite earlier ones.
+pub fn draft_by_player(connection: &Connection) -> AppResult<std::collections::HashMap<i64, DraftPick>> {
+    let mut statement = connection.prepare(
+        "SELECT player_id, player_name, draft_year, round, overall_pick
+         FROM draft_picks ORDER BY draft_year, overall_pick",
+    )?;
+    let rows = statement.query_map([], |row| {
+        Ok(DraftPick {
+            player_id: row.get(0)?,
+            name: row.get(1)?,
+            draft_year: row.get(2)?,
+            round: row.get(3)?,
+            overall_pick: row.get(4)?,
+        })
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let pick = row?;
+        map.insert(pick.player_id, pick);
+    }
+    Ok(map)
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +690,23 @@ mod tests {
         let playoffs = list_players(&connection, "2025-26", "Playoffs", true).unwrap();
         assert_eq!(playoffs.len(), 1);
         assert_eq!(playoffs[0].team_source, TeamSource::LastSeason);
+    }
+
+
+    #[test]
+    fn draft_picks_round_trip() {
+        let connection = open_memory().unwrap();
+        let picks = vec![DraftPick {
+            player_id: 1,
+            name: "A".into(),
+            draft_year: 2024,
+            round: 1,
+            overall_pick: 3,
+        }];
+        assert_eq!(save_draft_picks(&connection, 2024, &picks).unwrap(), Some(1));
+        let loaded = draft_picks(&connection, 2024).unwrap();
+        assert_eq!(loaded[0].overall_pick, 3);
+        assert!(draft_by_player(&connection).unwrap().contains_key(&1));
     }
 
     #[test]

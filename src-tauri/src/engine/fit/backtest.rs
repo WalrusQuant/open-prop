@@ -39,7 +39,7 @@ pub struct Score {
 }
 
 impl Score {
-    fn add(&mut self, pmf: &[f64], actual: f64, lines: &[f64], covered: bool) {
+    pub(crate) fn add(&mut self, pmf: &[f64], actual: f64, lines: &[f64], covered: bool) {
         let index = actual.round().max(0.0) as usize;
         let mass = pmf.get(index).copied().unwrap_or(0.0);
         let loss = -mass.max(1e-12).ln();
