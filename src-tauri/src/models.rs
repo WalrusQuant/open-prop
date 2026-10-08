@@ -283,6 +283,8 @@ pub struct TrendSummary {
     pub sd: Option<f64>,
     pub min: Option<f64>,
     pub max: Option<f64>,
+    /// 0-minute games in the window's span. They are not in the sample.
+    pub dnp: usize,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -325,7 +327,9 @@ pub struct BoardRow {
     pub player_id: i64,
     pub name: String,
     pub team: String,
+    /// Games played. 0-minute games are left out of every split.
     pub games: usize,
+    pub dnp: usize,
     pub mean: f64,
     pub last5: BoardSplit,
     pub last10: BoardSplit,

@@ -244,6 +244,7 @@ export function previewTrend(query: TrendQuery): TrendReport {
       sd: sampleSd(values),
       min: values.length ? Math.min(...values) : null,
       max: values.length ? Math.max(...values) : null,
+      dnp: 0,
     },
   };
 }
@@ -266,6 +267,7 @@ export function previewBoard(query: BoardQuery): BoardRow[] {
       name: player.name,
       team: player.team,
       games: values.length,
+      dnp: 0,
       mean: mean(values) ?? 0,
       last5: boardSplit(values, query.line, 5),
       last10,

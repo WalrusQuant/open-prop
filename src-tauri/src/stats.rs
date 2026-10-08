@@ -7,6 +7,25 @@ pub fn is_over(stat: f64, line: f64) -> bool {
     stat >= line
 }
 
+/// A 0-minute game is a did-not-play. Hit rates leave it out, the same as the model.
+pub fn played(game: &GameLog) -> bool {
+    game.minutes > 0.0
+}
+
+/// Did-not-play games on or after the first game of `slice`. A whole season counts all of them.
+fn dnp_since(games: &[GameLog], slice: &[GameLog], window: Window) -> usize {
+    let first = match (window, slice.first()) {
+        (Window::Season, _) => None,
+        (_, Some(game)) => Some(game.game_date.as_str()),
+        (_, None) => return 0,
+    };
+    games
+        .iter()
+        .filter(|game| !played(game))
+        .filter(|game| first.is_none_or(|date| game.game_date.as_str() >= date))
+        .count()
+}
+
 /// Trailing three-game average, including the current game.
 /// The first two games in the window have no average.
 pub fn moving_average(values: &[f64], width: usize) -> Vec<Option<f64>> {
@@ -112,7 +131,9 @@ pub fn trend_report(
     season: &str,
     season_type: &str,
 ) -> TrendReport {
-    let slice = window_games(games, window);
+    let played_games: Vec<GameLog> = games.iter().filter(|game| played(game)).cloned().collect();
+    let slice = window_games(&played_games, window);
+    let dnp = dnp_since(games, slice, window);
     let values: Vec<f64> = slice.iter().map(|game| stat.value(game)).collect();
     let averages = moving_average(&values, 3);
     let overs = values.iter().filter(|value| is_over(**value, line)).count();
@@ -174,6 +195,7 @@ pub fn trend_report(
             sd: sample_sd(&values),
             min: values.iter().copied().reduce(f64::min),
             max: values.iter().copied().reduce(f64::max),
+            dnp,
         },
         games: report_games,
     }
@@ -200,18 +222,20 @@ pub fn leaderboard(games: &[GameLog], stat: Stat, min_games: u32, line: f64) -> 
             .position(|game| game.player_id != player_id)
             .map(|offset| index + offset)
             .unwrap_or(games.len());
-        let group = &games[index..end];
+        let all = &games[index..end];
         index = end;
-        if group.len() < min_games as usize {
+        let group: Vec<&GameLog> = all.iter().filter(|game| played(game)).collect();
+        if group.is_empty() || group.len() < min_games as usize {
             continue;
         }
         let values: Vec<f64> = group.iter().map(|game| stat.value(game)).collect();
-        let latest = group.last().expect("group is non-empty");
+        let latest = all.last().expect("group is non-empty");
         rows.push(BoardRow {
             player_id,
             name: latest.player_name.clone(),
             team: latest.team_abbr.clone(),
             games: group.len(),
+            dnp: all.len() - group.len(),
             mean: mean(&values).unwrap_or(0.0),
             last5: window_hits(&values, line, Some(5)),
             last10: window_hits(&values, line, Some(10)),
@@ -282,6 +306,43 @@ mod tests {
         assert_eq!((rows[0].last5.overs, rows[0].last5.games), (5, 5));
         assert_eq!((rows[0].last10.overs, rows[0].last10.games), (5, 10));
         assert_eq!((rows[0].season.overs, rows[0].season.games), (5, 12));
+    }
+
+    #[test]
+    fn the_board_leaves_out_zero_minute_games() {
+        let mut games: Vec<GameLog> = (1..=12)
+            .map(|day| game(&format!("2026-01-{day:02}"), 30, 0, 0))
+            .collect();
+        games[11].minutes = 0.0;
+        games[11].pts = 0;
+        games[5].minutes = 0.0;
+        games[5].pts = 0;
+        let rows = leaderboard(&games, Stat::Points, 10, 20.0);
+        assert_eq!(rows.len(), 1);
+        assert_eq!((rows[0].games, rows[0].dnp), (10, 2));
+        assert_eq!((rows[0].last5.overs, rows[0].last5.games), (5, 5));
+        assert_eq!((rows[0].last10.overs, rows[0].last10.games), (10, 10));
+        assert_eq!(rows[0].mean, 30.0);
+        assert!(leaderboard(&games, Stat::Points, 11, 20.0).is_empty(), "min games counts played games");
+    }
+
+    #[test]
+    fn the_trend_leaves_out_zero_minute_games_and_counts_them() {
+        let mut games: Vec<GameLog> = (1..=12)
+            .map(|day| game(&format!("2026-01-{day:02}"), 25, 0, 0))
+            .collect();
+        games[10].minutes = 0.0;
+        games[10].pts = 0;
+        games[1].minutes = 0.0;
+        games[1].pts = 0;
+        let last5 = trend_report(&games, Stat::Points, Window::Last5, 20.0, "2025-26", "Regular Season");
+        assert_eq!(last5.games.len(), 5);
+        assert_eq!(last5.games[0].game_date, "2026-01-07");
+        assert_eq!((last5.summary.overs, last5.summary.sample, last5.summary.dnp), (5, 5, 1));
+        assert_eq!(last5.summary.min, Some(25.0));
+        let season = trend_report(&games, Stat::Points, Window::Season, 20.0, "2025-26", "Regular Season");
+        assert_eq!((season.summary.overs, season.summary.sample, season.summary.dnp), (10, 10, 2));
+        assert_eq!(season.summary.hit_rate, Some(1.0));
     }
 
     #[test]

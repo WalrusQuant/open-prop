@@ -184,6 +184,7 @@
           {shown.length.toLocaleString()}
           {shown.length === 1 ? "player" : "players"}.
           {floor.rate > 0 ? `${floor.label}, at least 8 games in the window.` : `At least ${MIN_GAMES} games.`}
+          0-minute games are not counted.
           {loading ? "Updating." : ""}
         </caption>
         <thead>
@@ -207,7 +208,10 @@
               <td class="rate"><strong>{rate(row.last5)}</strong><span>{row.last5.overs}/{row.last5.games}</span></td>
               <td class="rate"><strong>{rate(row.last10)}</strong><span>{row.last10.overs}/{row.last10.games}</span></td>
               <td class="rate"><strong>{rate(row.last20)}</strong><span>{row.last20.overs}/{row.last20.games}</span></td>
-              <td class="rate"><strong>{rate(row.season)}</strong><span>{row.season.overs}/{row.season.games}</span></td>
+              <td class="rate">
+                <strong>{rate(row.season)}</strong>
+                <span>{row.season.overs}/{row.season.games}{row.dnp > 0 ? ` · ${row.dnp} DNP` : ""}</span>
+              </td>
               <td>{formatStat(row.mean)}</td>
             </tr>
           {/each}

@@ -81,6 +81,8 @@ export interface TrendSummary {
   sd: number | null;
   min: number | null;
   max: number | null;
+  /** 0-minute games in the window's span. They are not in the sample. */
+  dnp: number;
 }
 
 export interface TrendReport {
@@ -115,7 +117,9 @@ export interface BoardRow {
   playerId: number;
   name: string;
   team: string;
+  /** Games played. 0-minute games are left out of every split. */
   games: number;
+  dnp: number;
   mean: number;
   last5: BoardSplit;
   last10: BoardSplit;

@@ -7,7 +7,7 @@
   import TrendChart from "$lib/components/TrendChart.svelte";
   import { errorText, loadPlayers, loadTrend } from "$lib/api";
   import { wilson } from "$lib/deskMath";
-  import { downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
+  import { dnpSentence, downloadCsv, formatLine, formatStat, round1, shortDate } from "$lib/format";
   import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
   import type { PlayerOption, Prediction as Projection, TrendGame, TrendReport } from "$lib/types";
 
@@ -520,6 +520,9 @@
         {/if}
         {#if activeSplit.sample < 30}
           {activeSplit.sample} games is a small sample, so that interval is wide.
+        {/if}
+        {#if report.window === windowId && report.summary.dnp > 0}
+          {dnpSentence(report.summary.dnp)}
         {/if}
       </p>
     {/if}
