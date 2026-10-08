@@ -17,6 +17,10 @@ pub struct Arm {
 
 /// Team game buckets the report splits on.
 pub const BUCKETS: [(usize, usize); 3] = [(1, 3), (4, 6), (7, 10)];
+/// Key of every row. The bucket after it holds the first game of the season of each player
+/// who played in the seed season, the game a carry prices on its own.
+pub const ALL_ROWS: usize = BUCKETS.len();
+pub const FIRST_GAME: usize = BUCKETS.len() + 1;
 
 #[derive(Debug, Clone, Default)]
 pub struct Score {
@@ -138,7 +142,8 @@ fn team_game_numbers(games: &[GameLog]) -> HashMap<(i64, String), usize> {
 }
 
 /// Scores every player-game through team game `last_game` for each arm. The key is
-/// (arm index, bucket index); bucket `BUCKETS.len()` holds every row.
+/// (arm index, bucket index); `ALL_ROWS` holds every row and `FIRST_GAME` the first game of
+/// each player with seed-season minutes, priced from the prior alone.
 pub fn run(
     games: &[GameLog],
     seed: &[GameLog],
@@ -153,6 +158,7 @@ pub fn run(
     // Last season's populations fit once. Only the carry depends on the arm.
     let base = seed_parts(seed, stat, spec)?;
     let seed_rows: Vec<_> = parts_of(stat).iter().map(|part| observations(seed, *part)).collect();
+    let carried: HashSet<i64> = seed_rows[0].iter().map(|row| row.player_id).collect();
     let seeds: Vec<Vec<Option<SeedPart>>> = arms
         .iter()
         .map(|arm| {
@@ -226,26 +232,34 @@ pub fn run(
                     scores.entry((arm_index, bucket)).or_default().add(&forecast.pmf, actual, &lines, covered);
                 }
                 scores
-                    .entry((arm_index, BUCKETS.len()))
+                    .entry((arm_index, ALL_ROWS))
                     .or_default()
                     .add(&forecast.pmf, actual, &lines, covered);
+                if nth == 0 && carried.contains(&row.player_id) {
+                    scores
+                        .entry((arm_index, FIRST_GAME))
+                        .or_default()
+                        .add(&forecast.pmf, actual, &lines, covered);
+                }
             }
         }
     }
     Ok(scores)
 }
 
-/// A markdown table per stat: log loss by bucket, then CRPS, Brier, and calibration over all rows.
+/// A markdown table per stat: log loss by bucket, then CRPS, Brier, and calibration over all rows,
+/// then the first game of each player with seed-season minutes (`p-g1`) on its own.
 pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>) -> String {
     let mut text = format!(
-        "### {}\n\n| carry | opp carry | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL today rows | CRPS | Brier | ECE | rows | today |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "### {}\n\n| carry | opp carry | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL today rows | CRPS | Brier | ECE | rows | today | LL p-g1 | CRPS p-g1 | Brier p-g1 | ECE p-g1 | p-g1 rows |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         stat.label()
     );
     for (arm_index, arm) in arms.iter().enumerate() {
         let cell = |bucket: usize| scores.get(&(arm_index, bucket)).cloned().unwrap_or_default();
-        let all = cell(BUCKETS.len());
+        let all = cell(ALL_ROWS);
+        let first = cell(FIRST_GAME);
         text.push_str(&format!(
-            "| {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.0}% |\n",
+            "| {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.0}% | {:.4} | {:.4} | {:.4} | {:.4} | {} |\n",
             arm.carry_minutes,
             arm.opponent_carry_minutes,
             cell(0).mean_log_loss(),
@@ -258,6 +272,11 @@ pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>
             all.calibration_error(),
             all.rows,
             100.0 * all.covered_today as f64 / all.rows.max(1) as f64,
+            first.mean_log_loss(),
+            first.mean_crps(),
+            first.mean_brier(),
+            first.calibration_error(),
+            first.rows,
         ));
     }
     text
