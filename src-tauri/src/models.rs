@@ -217,9 +217,15 @@ pub struct Bootstrap {
 pub struct SyncReport {
     pub season: String,
     pub season_type: String,
+    /// Games and players in the cache after the sync.
     pub games: usize,
     pub players: usize,
-    pub synced_at: String,
+    /// Rows the NBA response carried.
+    pub fetched: usize,
+    /// None when a kept cache has never been synced.
+    pub synced_at: Option<String>,
+    /// Set when the response was empty or short and the cache was kept.
+    pub warning: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]

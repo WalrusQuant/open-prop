@@ -123,7 +123,7 @@ pub async fn sync_season(
         .await
         .map_err(show)?;
     let connection = lock_db(&state.db)?;
-    db::replace_logs(&connection, &season, &season_type, &games).map_err(show)
+    db::merge_logs(&connection, &season, &season_type, &games).map_err(show)
 }
 
 #[tauri::command]

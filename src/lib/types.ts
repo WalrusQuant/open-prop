@@ -24,9 +24,14 @@ export interface Bootstrap {
 export interface SyncReport {
   season: string;
   seasonType: string;
+  /** Games and players in the cache after the sync. */
   games: number;
   players: number;
-  syncedAt: string;
+  /** Rows the NBA response carried. */
+  fetched: number;
+  syncedAt: string | null;
+  /** Set when the response was empty or short and the cache was kept. */
+  warning: string | null;
 }
 
 export interface PlayerOption {

@@ -55,6 +55,7 @@
           onchange={(event) => {
             session.season = event.currentTarget.value;
             session.notice = null;
+            session.warning = null;
             session.error = null;
           }}
         >
@@ -70,6 +71,7 @@
           onchange={(event) => {
             session.seasonType = event.currentTarget.value;
             session.notice = null;
+            session.warning = null;
             session.error = null;
           }}
         >
@@ -103,6 +105,9 @@
   {/if}
   {#if session.error}
     <p class="banner bad">{session.error}</p>
+  {/if}
+  {#if session.warning}
+    <p class="banner warn">{session.warning}</p>
   {/if}
   {#if session.notice}
     <p class="banner">{session.notice}</p>

@@ -7,6 +7,7 @@ export const session = $state({
   syncing: false,
   error: null as string | null,
   notice: null as string | null,
+  warning: null as string | null,
   season: "2025-26",
   seasonType: "Regular Season",
   seasons: [] as SeasonStatus[],
@@ -44,9 +45,14 @@ export async function syncCurrent() {
   session.syncing = true;
   session.error = null;
   session.notice = null;
+  session.warning = null;
   try {
     const report = await syncSeason(session.season, session.seasonType);
-    session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.`;
+    if (report.warning) {
+      session.warning = report.warning;
+    } else {
+      session.notice = `Cached ${report.games.toLocaleString()} games for ${report.players.toLocaleString()} players.`;
+    }
     const data = await loadBootstrap();
     session.seasons = data.seasons;
   } catch (caught) {
