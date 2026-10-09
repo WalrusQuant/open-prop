@@ -299,16 +299,6 @@ impl RookieBucket {
             None => Self::Undrafted,
         }
     }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::LotteryTop => "picks 1-5",
-            Self::LotteryRest => "picks 6-14",
-            Self::FirstRoundLate => "picks 15-30",
-            Self::SecondRound => "2nd round",
-            Self::Undrafted => "undrafted",
-        }
-    }
 }
 
 /// One scheduled game in a playoff series, from `commonplayoffseries`.
@@ -490,6 +480,8 @@ pub struct TrainStatReport {
     pub seeded_from: Option<String>,
     pub carry_minutes: Option<f64>,
     pub opponent_carry_minutes: Option<f64>,
+    /// Scale for `exp(-m/τ)`. Zero turns the fade off.
+    pub carry_decay_tau: Option<f64>,
 }
 
 #[derive(Debug, Clone, Serialize)]

@@ -183,7 +183,7 @@
           Sync {sourceName} to start each player from it.
         {:else if session.seed && !cached}
           No {session.season} games yet. The fit stands on {sourceName}, so every player who played
-          in it can be priced before his first game.
+          in it gets a probability before his first game.
         {:else if session.seed}
           Each player starts from his {sourceName}.
         {:else}

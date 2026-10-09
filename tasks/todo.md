@@ -86,12 +86,12 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [x] Each player's rate prior adds his own last season, capped at `carry_minutes` (1000) adjusted pseudo-minutes. Playoffs carry their regular season. Rookies keep the role prior. Traded players keep their carry.
 - [x] Opponent multipliers start from last season's, pulled toward 1 by `opponent_carry_minutes` (1500).
 - [x] Minutes start from last season's average and fade to the role as games come in.
-- [x] A seeded fit borrows last season's role rates, minutes, home, and rest until this season has 100 rows, and does not wait for 20 training rows. A player with carry is priced after one game.
-- [x] Home has a "Carry last season" checkbox. Cards, the model page, and the player page ("Prior from 2024-25") say when a fit carried a season.
+- [x] A seeded fit borrows last season's role rates, minutes, home, and rest until this season has 100 rows, and does not wait for 20 training rows. A player with carry gets a probability before his first game.
+- [x] Home has a "Carry last season" checkbox. Cards, the model page, and the player page ("Prior from" the seed season) say when a fit carried a season.
 - [x] `sync-season` and `backtest-prior` bins. Backtest on the first 10 team games of 2024-25 and 2025-26.
 - [x] Carry decay `exp(-m/τ)` with τ = 500. Late-season LL improved on PTS/PRA in 2024-25 and 2025-26; early buckets stayed flat.
 - [x] Per-stat `carry_minutes`. All 14 stats stay at 1000; a 0–2000 grid on the other nine in 2024-25 and 2025-26 was within ~0.001 LL of 1000.
-- [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player is priced at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
+- [x] Day one. With carry on, the list adds every seed-season player and this season's rosters (`commonallplayers`, stored per season, fetched only for the season that is on or, from July, about to open). A carried player gets a probability at 0 games; a rookie is refused with the reason. The trend shows "No games this season yet" and last season's hit rate. `backtest-prior` scores each carried player's first game (`p-g1`).
 - [x] Playoff list. Syncing Playoffs stores `leaguestandingsv3` clinch/play-in teams; once playoff games exist those teams win. Fallback is the wide list plus a sync note.
 - [x] Mid-season roster. Every sync of the roster season refreshes `commonallplayers`. Roster overrides team and board membership; waived players stay labelled "Not on a roster".
 - [x] Mid-playoff elimination. `commonplayoffseries` plus four losses in a series drops the team from the playoff list.

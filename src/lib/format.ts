@@ -64,7 +64,7 @@ export function intervalSentence(report: TrendReport): string {
 export function sampleNote(sample: number): string {
   if (sample === 0) return "Sync a season to fill the cache.";
   if (sample < 30) {
-    return `${sample} games is a small sample. The width of the interval is the result.`;
+    return `${sample} games is a small sample, so that interval is wide.`;
   }
   return "The count in the middle is the center of an interval, not a promise about the next game.";
 }

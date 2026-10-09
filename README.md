@@ -51,9 +51,9 @@ A game with 0 minutes is a did-not-play, not a miss. The hit rates, the board, a
 
 Combo stats are box-score sums. The player page fills the number from the median of the selected window until you type one. Changing the window does not move a number you already set.
 
-The band under the hit rates is a 95% Wilson interval, z = 1.96. Five of the last ten is about 24% to 76%. The width is the result. The percentage in the middle is just where the count landed.
+The band under the hit rates is a 95% Wilson interval, z = 1.96. Five of the last ten is about 24% to 76%. Both ends fit the same ten games.
 
-The chart marks a game green when it cleared and red when it missed. The gold path is the current game plus the two before it, inside the window only. The first two games have no average. That path describes the window. It does not forecast the next game.
+The chart marks a game green when it cleared and red when it missed. The gold path is the mean of the current game and the two before it, inside the window only. The first two games have no average. That path describes the window. It does not forecast the next game.
 
 Home and away come from the matchup text (`DAL vs. CHI` is home, `DEN @ SAS` is away). Back-to-back means the previous game in this cache was the day before. The other games are rested. These are the same games, counted again.
 
@@ -61,66 +61,47 @@ The player page can export the games in the window as CSV.
 
 ## The model
 
-Train once per stat per season, from the home page. Every counting stat is a rate per minute. A short sample shrinks toward players in a similar minutes role, so five loud games cannot invent a new player. The shipped cuts are under 15 minutes, 15 to 28, and 28 or more.
+Train once per stat per season, from the home page. Each counting stat is a rate per minute with a gamma prior. The probability at a number is the negative binomial that prior implies: wider when the expected total is higher, and never below zero. A line of 12.5 means 13 or more, because the predictive is a count. Blocks and steals keep their zeros in that same distribution. The percent at a line is that distribution, summed from the line up. The usual range is the middle 80% of it.
 
-Each opponent has its own multiplier, fit with the rates, so a big night against a soft defense does not all stick to the player. Home and an extra day of rest are two more multipliers. Their priors are tight, so the effects stay small unless the games support them. A blank opponent is a multiplier of 1. An opponent abbreviation that never appeared in the cache is an error.
+A short sample shrinks toward players in a similar minutes role. The shipped cuts are under 15 minutes, 15 to 28, and 28 or more. Each opponent has its own multiplier, fit with the rates. Home and an extra day of rest are two more multipliers. Their priors are tight, so the effects stay small unless the games support them. A blank opponent is a multiplier of 1. An opponent abbreviation that never appeared in the cache is an error.
 
-The predictive count gets wider as the expected total gets higher, and it cannot go below zero. Blocks and steals keep their zeros in that same distribution. The percent at a line is that distribution, summed from the line up. The usual range is the middle 80% of it.
+Last 5, last 10, and last 20 each carry a second rate. "New rate" on the player page is the weight on that rate in a mixture with the season rate. A low weight leaves the prediction close to the season rate. The season window does not run the test. The weight stays at zero until the player has five games before the window, so last 5 does not move until 10 games. Combos do not show one number for it, because the parts can disagree.
 
-The trend window is part of the model. Last 5, last 10, and last 20 each get a second rate and a probability that those games are a real change rather than noise. If that probability is low, the prediction stays with the season rate. On the player page that probability is "New rate". The season window does not run the test. Combos do not show one number for it, because the parts can disagree.
+Minutes are a separate distribution. With the field blank, the model takes the last 10, shrinks them toward an anchor with a weight of three games, and draws a lognormal on a grid from 0 to 48. The anchor is the role mean. When last season is carried, the anchor starts at last season's minutes per game, counted as three games, and moves toward the role as this season's games come in. Points, rebounds, and assists share that uncertainty, and so do the combos built from them. Given the minutes, the rates are separate. Typing minutes uses that number. Anything over 48, up to 60, is read as 48.
 
-Minutes have their own distribution: the last 10, shrunk toward the role, clipped from 0 to 48. Points, rebounds, and assists share that uncertainty, and so do the combos built from them. Given the minutes, the rates are separate. This is not a draw that scales every stat by one minute shock.
-
-A combo is the sum of its parts. Points + assists is the points model plus the assists model. The combo file stores those fitted parts, so a prediction does not depend on load order. Home and rest are left off the combo page because the parts do not share one multiplier.
+A combo is the sum of its parts. Points + assists is the points model plus the assists model. The combo file stores those fitted parts, so a prediction does not depend on load order. Home and rest still apply, once per part. The model page does not show one home multiplier or one rest multiplier for a combo, because the parts do not share one.
 
 The last 20% of distinct dates are held out. The saved model is the one that did not see those dates. The model page shows that model's mean absolute error next to the player's own last-10 total on the same games, and how often the actual stat landed in the middle 80%. If the last-10 total was closer, both numbers still show. Holdout error stays on the model page. It is not on the player page.
 
 ### Last season as the prior
 
-A fit starts from the season before it when that season is cached. A regular season carries the previous regular season. Playoffs carry the regular season they follow. Each player's rate prior adds his own totals from that season, adjusted for opponents, home, and rest, and capped at `carry_minutes` pseudo-minutes. The shipped cap is 1,000 minutes, so a starter's own games outweigh last season after about 30 games. His minutes start from last season's average, counted as three games. Each opponent multiplier starts from last season's, pulled toward 1 by `opponent_carry_minutes`. A team with no multiplier last season starts at 1.
+A fit starts from the season before it when that season is cached. A regular season carries the previous regular season. Playoffs carry the regular season they follow. Each player's rate prior adds his own totals from that season, adjusted for opponents, home, and rest, and capped at `carry_minutes` pseudo-minutes. The shipped cap is 1,000. After that cap, the weight on the carry is `exp(-m / τ)`, where `m` is minutes played this season and `τ` is `carry_decay_tau`. The shipped τ is 500, so the carry is about 37% after 500 minutes. His minutes start from last season's average, counted as three games. Each opponent multiplier starts from last season's, pulled toward 1 by `opponent_carry_minutes`. A team with no multiplier last season starts at 1.
 
-A rookie, or anyone without minutes in the seed season, keeps the role prior. A traded player keeps his carry, because his rate is his and the multipliers belong to the opponents.
+The player page says "Prior from" the seed season while the stored carry, before decay, is still larger than this season's adjusted minutes. For a starter that is about 30 games. The label can still be up after the decay has already cut the rate.
 
-Until this season has 100 rows for a stat, the fit borrows last season's role rates, minutes, home, and rest. A seeded fit does not wait for 20 training rows, and it fits with none, so a player with carry can be priced before his first game. The player page says "Prior from 2024-25 Regular Season" while last season still outweighs this one. Everyone else still waits for five games. A draft×role rookie prior was backtested on 2024-25 and 2025-26 (`backtest-rookie`) and lost to the role prior, so the five-game wait stays. Draft classes can be cached with `sync-draft`. League-wide carry drift was also tried and left off. The model page names the season a fit carried. Untick "Carry last season" on the home page to fit without it, or set `carry_minutes` to 0 in one spec.
+A rookie, or anyone without minutes in the seed season, keeps the role prior and waits for five games. A traded player keeps his carry, because his rate is his and the multipliers belong to the opponents.
 
-The shipped cap comes from a backtest on the first 10 team games of 2024-25 and 2025-26, each seeded from the season before. Every game was predicted from games before its date. Against the role prior alone, the carry cut log loss on every stat and bucket, most in team games 1 to 3, and it still helped in games 11 to 30. Caps from 500 to 2,000 scored about the same. `src-tauri/src/bin/backtest_prior.rs` reruns it on a scratch database filled by `sync-season`:
+Until this season has 100 rows for a stat, the fit borrows last season's role rates, minutes, home, and rest. A seeded fit does not wait for 20 training rows, and it fits with none, so a player with carry gets a probability before his first game. Everyone else still waits for five games. The model page names the season a fit carried. Untick "Carry last season" on the home page to fit without it, or set `carry_minutes` to 0 in one spec.
 
-```bash
-cd src-tauri
-cargo run --release --bin sync-season -- /tmp/backtest.db 2024-25
-cargo run --release --bin sync-season -- /tmp/backtest.db 2025-26
-cargo run --release --bin backtest-prior -- /tmp/backtest.db 2025-26 2024-25 0,250,500,1000,2000 1500 10
-```
+### Before the first game
 
-### Opening night
+When the seed season is cached and "Carry last season" is ticked, the player list is this season's players plus everyone who played in the seed season. A player without a game this season says "no games yet" in the list and on his page. Untick the carry and the list is this season's players only.
 
-Before a player's first game, the player list is this season's players plus everyone who played in the seed season, when that season is cached and "Carry last season" is ticked. A player without a game this season says "no games yet" in the list and on his page. Untick the carry and the list is this season's players only.
+His team comes from this season's roster. A sync of the season that is on, or from July the one about to open, refreshes that roster from stats.nba.com and stores it. A traded player's team is the roster team. A player with games who is on no roster stays in the player list as "Not on a roster", and drops out of the board. A carried player with no games who is on no roster is dropped. A player on a roster with no carry is listed as "Rookie, needs 5 games" and still waits for five. If the roster call fails, or returns fewer than 300 players, the stored roster is kept. With no roster at all, the team is his last one in the seed season, and the page says "Team from" that season.
 
-His team comes from this season's rosters. A sync of the season that is on, or from July the one about to open, also calls stats.nba.com `commonallplayers` for every player on a roster and stores the answer in SQLite. The roster is refreshed on every such sync, not only before opening night. A traded player's team is the roster team. A player with games who is on no roster stays in the player list as "Not on a roster" so his history is still open, and drops out of the board. A carried player with no games who is on no roster is dropped. A player on a roster with no carry is listed as "Rookie, needs 5 games" and still waits for five. If the roster call fails, or answers with fewer than 300 players, the stored roster is kept. With no roster at all, the team is his last one in the seed season, and the player page says "Team from 2024-25". Any other season never calls it, because the endpoint answers with today's teams whatever season it is asked for.
+At zero games his rate is the carry prior plus the role prior, his minutes start from last season's average, and opponent, home, and rest use the carried multipliers. The trend says "No games this season yet" and shows last season's hit rate on the same number, labelled with that season. "Use the median" falls back to last season's median. A rookie at zero games is told he has no seed minutes to carry and waits for five games.
 
-### Playoff list
+### Playoffs
 
-Syncing Playoffs also calls `leaguestandingsv3` and stores every team with `ClinchedPostSeason` or `ClinchedPlayIn` (play-in teams count until they are out). The player list keeps only those teams. Once playoff games are in the cache, the teams in those games are the source of truth, so play-in losers drop out. Syncing Playoffs also stores `commonplayoffseries`. A team with four losses in any series is dropped from the list the next time it is opened. If the standings call fails and there are no playoff games yet, the list stays every carried player and the sync warning says the field is missing. `playoffpicture` is not used; it returns HTML now.
+Syncing Playoffs stores which teams have clinched a playoff spot or a play-in spot. The player list keeps only those teams. Once playoff games are in the cache, the teams in those games replace that list, so play-in losers drop out. A team with four losses in a series drops out the next time the list is opened. If the standings call fails and there are no playoff games yet, the list stays every carried player, and the sync note says the teams are not filtered yet.
 
-At zero games his rate is the carry prior plus the role prior, his minutes start from last season's average, and opponent, home, and rest use the carried multipliers. The player page says "Prior from" the seed season. The trend says "No games this season yet" and shows last season's hit rate on the same line, labelled with that season. "Use the median" falls back to last season's median. A rookie at zero games is told he has no seed minutes to carry and waits for five games.
+### The spot you name
 
-`backtest-prior` also scores each carried player's first game of the season, the `p-g1` columns. The fit for that game sees only earlier dates, so the first night is a fit with no rows from this season. On 2025-26 seeded from 2024-25, 464 first games:
+Without carry, a prediction waits until the player has five cached games. The first game of a season uses a rest of 2 days, because there is no previous day in the cache. Later rest is the gap between games, capped at 14. There is no schedule feed. The opponent, the site, the rest, and the minutes are the spot you name.
 
-| stat | log loss, role prior | log loss, carry 1,000 | CRPS, role prior | CRPS, carry 1,000 | calibration error, role prior | calibration error, carry 1,000 |
-|---|---:|---:|---:|---:|---:|---:|
-| Points | 5.834 | 3.314 | 6.465 | 3.354 | 0.177 | 0.017 |
-| Rebounds | 2.938 | 2.127 | 2.067 | 1.282 | 0.153 | 0.030 |
-| Assists | 2.552 | 1.724 | 1.413 | 0.914 | 0.150 | 0.028 |
-| Threes made | 1.668 | 1.244 | 0.729 | 0.534 | 0.150 | 0.039 |
-| PRA | 6.431 | 3.705 | 9.562 | 4.551 | 0.193 | 0.039 |
+The app stores threes made and free throws made. It does not store three-point attempts or free-throw attempts, so points stay a count per minute.
 
-2024-25 seeded from 2023-24, 447 first games, moved the same way. Points log loss went from 5.624 to 3.156 and PRA from 6.338 to 3.543. The role prior alone is far off on the first night because it prices every player in a minutes role the same.
-
-Without carry, a prediction waits until the player has five cached games. The first game of a season uses a neutral rest of 2 days, because there is no previous day in the cache. Later rest is the gap between games, capped at 14. There is no schedule feed. The opponent, the site, the rest, and the minutes are the spot you name. They are not "tomorrow".
-
-Points are not literally a Poisson process. A point total is twos and threes. The working model is still a count per minute. The box score has no three-point attempts and no free-throw attempts, so the app does not invent a shot-level model.
-
-An older tree file will not load. The home page asks you to refit.
+A file saved by the old tree model will not load. The home page asks you to refit.
 
 ## Changing the model
 
@@ -136,9 +117,9 @@ Shipped values, same for every stat:
 | `role_minutes` | `[15, 28]` | Rising cuts, in minutes, that separate roles. | 1 to 4 cuts, each in (0, 48) |
 | `home_sd` | 0.08 | Prior standard deviation of the log home multiplier. | (0, 1] |
 | `rest_sd` | 0.015 | Prior standard deviation of the log rest multiplier, per day. | (0, 0.2] |
-| `carry_minutes` | 1000 | Most pseudo-minutes of last season in a player's rate prior. 0 turns the player carry off. Every counting stat uses 1000 after a grid on 2024-25 and 2025-26; 500–2000 scored within ~0.001 LL. | [0, 5000] |
+| `carry_minutes` | 1000 | Most pseudo-minutes of last season in a player's rate prior. 0 turns the player carry off. | [0, 5000] |
 | `opponent_carry_minutes` | 1500 | Pseudo-minutes that pull an opponent multiplier toward last season's. | [0, 20000] |
-| `carry_decay_tau` | 500 | Scale for `exp(-m/τ)` decay of the player carry as this season's minutes `m` grow. 0 turns decay off. Tuned on PTS and PRA over full seasons. | [0, 20000] |
+| `carry_decay_tau` | 500 | Scale for `exp(-m/τ)` decay of the player carry as this season's minutes `m` grow. 0 turns decay off. | [0, 20000] |
 
 Training needs at least 20 rows after the holdout, unless the fit carries last season. A row is a game that already has five earlier games for that player. Games with zero minutes are skipped. The game being scored is not inside its own rate.
 

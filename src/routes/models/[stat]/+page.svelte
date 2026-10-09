@@ -103,7 +103,8 @@
     <h2>What this model is</h2>
     {#if parts}
       <p>
-        {label} is the sum of {parts}. It is not a separate rate. Each part is a count per minute,
+        {label} is the sum of {parts}. It is not a separate rate. Each part is a negative binomial
+        count per minute,
         shrunk toward players who play similar minutes, with its own opponent, home, and rest
         multipliers. Points, rebounds, and assists share one minutes distribution. Once the minutes
         are fixed, the rates are separate. The chance at a line is that sum. The saved fit did not
@@ -112,15 +113,14 @@
       </p>
     {:else}
       <p>
-        {label} is one rate per minute for the whole season, not one model per player. A short
-        sample shrinks toward players who play similar minutes. Each opponent has its own
-        multiplier, so a big night against a soft defense does not all stick to the player. Home
-        and rest are two small multipliers. The chance at a line comes from the full distribution:
-        wider when the expected total is higher, and never below zero. Last 5, last 10, and last 20
-        mix in a second rate only when those games look like a real change. The season window uses
-        the full rate. The saved fit did not see the last 20% of dates. Those dates are the test,
-        next to each player's last-10 total. A game clears a line when the stat is at or above it.
-        There is no odds feed.
+        {label} is one rate per minute for the whole season, with a gamma prior, not one model per
+        player. A short sample shrinks toward players who play similar minutes. Each opponent has
+        its own multiplier. Home and rest are two small multipliers. The chance at a line is a
+        negative binomial: wider when the expected total is higher, and never below zero. Last 5,
+        last 10, and last 20 mix in a second rate. The weight on it is how much those games look
+        like a real change. The season window uses the season rate. The saved fit did not see the
+        last 20% of dates. Those dates are the test, next to each player's last-10 total. A game
+        clears a line when the stat is at or above it. There is no odds feed.
       </p>
     {/if}
   </section>
@@ -133,6 +133,7 @@
       <div><dt>Shift prior</dt><dd>{number(row?.shiftPrior ?? null, 2)}</dd></div>
       <div><dt>Carry minutes</dt><dd>{whole(row?.carryMinutes ?? null)}</dd></div>
       <div><dt>Opponent carry</dt><dd>{whole(row?.opponentCarryMinutes ?? null)}</dd></div>
+      <div><dt>Carry decay</dt><dd>{whole(row?.carryDecayTau ?? null)}</dd></div>
       {#if row?.seededFrom}
         <div><dt>Carried</dt><dd>{row.seededFrom}</dd></div>
       {/if}
@@ -150,7 +151,7 @@
         are used for each part. An edit takes effect the next time you refit.
       {:else if row?.settingsStored}
         These priors were stored with this fit. Home and rest per day are the multipliers the fit
-        landed on. An agent can change the priors in <code>models/specs/{statId}.json</code> and refit.
+        landed on. Edit the priors in <code>models/specs/{statId}.json</code> and refit.
       {:else}
         The spec lives in <code>models/specs/{statId}.json</code>. Refit on the home page to use it.
       {/if}

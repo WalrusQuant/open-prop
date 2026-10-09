@@ -66,8 +66,8 @@ games, not from a saved model file, so it cannot go stale or mismatch a spec. If
 is not cached, the fit is unseeded and says so.
 
 **Gates.** A seeded fit may save with fewer than 20 scored rows (the holdout numbers are blank
-until there are enough). A player with carry-over can be priced from his first game. Players
-without carry-over keep the five-game rule.
+until there are enough). A player with carry gets a probability before his first game. The
+first draft of this plan waited for one synced game. Players without carry keep the five-game rule.
 
 ## Data and settings
 
@@ -222,8 +222,8 @@ April) with and without the 2024-25 seed, after the minutes fade:
 | 3PM | 0.93 | 0.92 |
 | PRA | 6.43 | 6.45 |
 
-The late season is a wash (within 0.02). The carry is for the opening weeks; a time decay on the
-rate carry could close the last 0.02 on points and PRA and is left as an open question.
+The late season is a wash (within 0.02). The carry is for the opening weeks. A time decay on the
+rate carry later shipped at τ = 500. See "Shipped after the backtest" below.
 
 ### Rerun
 
@@ -266,3 +266,16 @@ Playoffs filter to `leaguestandingsv3` clinch/play-in teams (20 for 2024-25 and 
 then to teams in cached playoff games. Mid-season, every roster-season sync refreshes
 `commonallplayers`; waived players stay labelled off-roster and leave the board; traded
 players take the roster team.
+
+## Shipped after the backtest
+
+`carry_decay_tau = 500` for every stat. The weight on a player's carry is `exp(-m / τ)` as this
+season's minutes `m` grow. Late-season log loss improved on points and PRA in 2024-25 and 2025-26.
+Early buckets stayed flat. The end-of-season holdout gap above is what this decay was aimed at.
+
+A 0–2000 grid of `carry_minutes` on the other nine stats, in both seasons, stayed within about
+0.001 log loss of 1000. All 14 stats ship at 1000. `opponent_carry_minutes` stays 1500.
+
+A draft×role rookie prior was backtested on 2024-25 and 2025-26 with `backtest-rookie` and lost
+to the role prior. Rookies still wait five games. `sync-draft` caches a draft class for that
+backtest. League-wide carry drift was backtested and left off.

@@ -260,10 +260,11 @@ pub fn run(
     Ok(scores)
 }
 
-/// A markdown table per stat: log loss by bucket, CRPS, first game, and late season.
+/// A markdown table per stat: log loss by bucket, CRPS, first game, late season, and the
+/// Brier score, calibration error, and covered log loss already accumulated on each `Score`.
 pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>) -> String {
     let mut text = format!(
-        "### {}\n\n| carry | opp | tau | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL late | CRPS | rows | LL p-g1 | p-g1 rows |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
+        "### {}\n\n| carry | opp | tau | LL g1-3 | LL g4-6 | LL g7-10 | LL all | LL late | CRPS | rows | LL p-g1 | p-g1 rows | Brier | ECE | LL covered |\n|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|\n",
         stat.label()
     );
     for (arm_index, arm) in arms.iter().enumerate() {
@@ -272,7 +273,7 @@ pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>
         let first = cell(FIRST_GAME);
         let late = cell(LATE_SEASON);
         text.push_str(&format!(
-            "| {:.0} | {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.4} | {} |\n",
+            "| {:.0} | {:.0} | {:.0} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {:.4} | {} | {:.4} | {} | {:.4} | {:.4} | {:.4} |\n",
             arm.carry_minutes,
             arm.opponent_carry_minutes,
             arm.carry_decay_tau,
@@ -285,6 +286,9 @@ pub fn report(stat: Stat, arms: &[Arm], scores: &BTreeMap<(usize, usize), Score>
             all.rows,
             first.mean_log_loss(),
             first.rows,
+            all.mean_brier(),
+            all.calibration_error(),
+            all.covered_log_loss(),
         ));
     }
     text
