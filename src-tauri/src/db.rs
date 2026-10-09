@@ -671,6 +671,9 @@ pub fn save_draft_picks(connection: &Connection, year: i32, picks: &[DraftPick])
     Ok(Some(picks.len()))
 }
 
+/// Year-scoped read. The app loads every year through `draft_by_player`. This exists so the
+/// round trip can check one class.
+#[cfg(test)]
 pub fn draft_picks(connection: &Connection, year: i32) -> AppResult<Vec<DraftPick>> {
     let mut statement = connection.prepare(
         "SELECT player_id, player_name, draft_year, round, overall_pick

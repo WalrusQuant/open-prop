@@ -15,3 +15,5 @@ Home is the cache and the fitted models: what is loaded, sync, when each stat wa
 Plain sentences in one left-hand stack still failed. The number being checked has to be its own control, and the model and the trend have to be separate cards. Opponent, home or away, rest, and minutes belong inside the model card, at their own width. A later pass made that number and the percent enormous and laid the model facts in one overflowing row, so the labels sat on top of the values and the cards were mostly empty. Keep one type size. Put each fact in its own column with the label above the value. Do not leave a wide empty card around a single input.
 
 The board is not a season-average ranking of the whole league. Default it to who cleared the line in the last 10, and keep a search for everyone else.
+
+When a documentation pass is supposed to cover the whole app, update every user-facing copy of the claim. The README, the Method page, the model page, the home page, and helper strings such as `sampleNote` are one set. Leaving the home page on "priced" while the README says "a probability" is the miss.

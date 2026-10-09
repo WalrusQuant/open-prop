@@ -560,6 +560,7 @@ fn score_stat(
             report.seeded_from = score.seeded_from;
             report.carry_minutes = score.carry_minutes;
             report.opponent_carry_minutes = score.opponent_carry_minutes;
+            report.carry_decay_tau = score.carry_decay_tau;
             report
         }
         Err(error) => {
@@ -594,10 +595,11 @@ fn bare_report(stat: Stat) -> TrainStatReport {
         seeded_from: None,
         carry_minutes: None,
         opponent_carry_minutes: None,
+        carry_decay_tau: None,
     }
 }
 
-/// A missing fit can still show the priors an agent would train with.
+/// A missing fit still shows the priors from the spec on disk.
 fn fill_spec_gaps(report: &mut TrainStatReport, spec: &ModelSpec) {
     if report.prior_minutes.is_none() {
         report.prior_minutes = Some(spec.prior_minutes);
@@ -613,6 +615,9 @@ fn fill_spec_gaps(report: &mut TrainStatReport, spec: &ModelSpec) {
     }
     if report.opponent_carry_minutes.is_none() {
         report.opponent_carry_minutes = Some(spec.opponent_carry_minutes);
+    }
+    if report.carry_decay_tau.is_none() {
+        report.carry_decay_tau = Some(spec.carry_decay_tau);
     }
 }
 
@@ -654,6 +659,7 @@ fn train_stat(
     report.seeded_from = fitted.seeded_from.clone();
     report.carry_minutes = Some(fitted.carry_minutes);
     report.opponent_carry_minutes = Some(fitted.opponent_carry_minutes);
+    report.carry_decay_tau = Some(fitted.carry_decay_tau);
     fill_spec_gaps(&mut report, &spec);
     Ok(report)
 }

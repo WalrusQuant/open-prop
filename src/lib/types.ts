@@ -195,6 +195,8 @@ export interface TrainStatReport {
   seededFrom: string | null;
   carryMinutes: number | null;
   opponentCarryMinutes: number | null;
+  /** Scale for exp(-m/τ). Zero turns the fade off. */
+  carryDecayTau: number | null;
 }
 
 export interface TrainReport {
