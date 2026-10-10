@@ -126,6 +126,53 @@ pub fn scale_mix(components: &[Vec<f64>], weights: &[f64]) -> Vec<f64> {
     out
 }
 
+/// Spreads mass at fractional value `x` over the two neighbouring integers.
+fn deposit(out: &mut Vec<f64>, x: f64, prob: f64) {
+    let x = x.max(0.0);
+    let low = x.floor() as usize;
+    let frac = x - low as f64;
+    if out.len() < low + 2 {
+        out.resize(low + 2, 0.0);
+    }
+    out[low] += prob * (1.0 - frac);
+    out[low + 1] += prob * frac;
+}
+
+/// Stretches a pmf around its mean by `factor`. 1.0 leaves it alone. Mass pushed below
+/// zero lands on zero.
+pub fn widen(pmf: &[f64], factor: f64) -> Vec<f64> {
+    if pmf.is_empty() || (factor - 1.0).abs() < 1e-12 {
+        return pmf.to_vec();
+    }
+    let center = mean(pmf);
+    let mut out = vec![0.0; pmf.len()];
+    for (k, prob) in pmf.iter().enumerate() {
+        if *prob > 0.0 {
+            deposit(&mut out, center + (k as f64 - center) * factor, *prob);
+        }
+    }
+    trim(&mut out);
+    out
+}
+
+/// Mixes in a short night: with chance `weight` the game produces `scale` times the
+/// usual count (early exit, foul trouble, blowout, a minutes cut the model cannot see).
+pub fn short_night(pmf: &[f64], weight: f64, scale: f64) -> Vec<f64> {
+    let weight = weight.clamp(0.0, 1.0);
+    if pmf.is_empty() || weight == 0.0 {
+        return pmf.to_vec();
+    }
+    let mut short = vec![0.0; pmf.len()];
+    for (k, prob) in pmf.iter().enumerate() {
+        if *prob > 0.0 {
+            deposit(&mut short, k as f64 * scale.clamp(0.0, 1.0), *prob);
+        }
+    }
+    let mut out = mix(pmf, &short, weight);
+    trim(&mut out);
+    out
+}
+
 fn trim(pmf: &mut Vec<f64>) {
     while pmf.len() > 2 && pmf.last().copied().unwrap_or(0.0) < 1e-12 {
         pmf.pop();
@@ -273,5 +320,26 @@ mod tests {
     fn convolution_adds_the_supports() {
         let sum = convolve(&[0.0, 1.0], &[0.0, 0.0, 1.0]);
         assert!((sum[3] - 1.0).abs() < 1e-12, "{sum:?}");
+    }
+
+    #[test]
+    fn widen_keeps_the_mean_and_grows_the_spread() {
+        let pmf = negative_binomial(40.0, 2.0, 1.0);
+        let wide = widen(&pmf, 1.15);
+        assert!((wide.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        assert!((mean(&wide) - mean(&pmf)).abs() < 1e-3);
+        assert!((std_dev(&wide) / std_dev(&pmf) - 1.15).abs() < 0.01);
+        assert_eq!(widen(&pmf, 1.0), pmf);
+    }
+
+    #[test]
+    fn short_night_moves_weight_to_the_low_end() {
+        let pmf = negative_binomial(40.0, 2.0, 1.0);
+        let mixed = short_night(&pmf, 0.05, 0.35);
+        assert!((mixed.iter().sum::<f64>() - 1.0).abs() < 1e-9);
+        let expected = 0.95 * mean(&pmf) + 0.05 * 0.35 * mean(&pmf);
+        assert!((mean(&mixed) - expected).abs() < 1e-6);
+        assert!(at_least(&mixed, 0.0) > 0.999);
+        assert!(mixed[..4].iter().sum::<f64>() > pmf[..4].iter().sum::<f64>());
     }
 }

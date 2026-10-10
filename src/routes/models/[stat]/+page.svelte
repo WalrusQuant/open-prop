@@ -116,7 +116,9 @@
         {label} is one rate per minute for the whole season, with a gamma prior, not one model per
         player. A short sample shrinks toward players who play similar minutes. Each opponent has
         its own multiplier. Home and rest are two small multipliers. The chance at a line is a
-        negative binomial: wider when the expected total is higher, and never below zero. Last 5,
+        negative binomial: wider when the expected total is higher, and never below zero.
+        {#if statId === "points"}For points, it is stretched about 15% around its middle, with a 5%
+          chance of a short night at about a third of normal scoring.{/if} Last 5,
         last 10, and last 20 mix in a second rate. The weight on it is how much those games look
         like a real change. The season window uses the season rate. The saved fit did not see the
         last 20% of dates. Those dates are the test, next to each player's last-10 total. A game
