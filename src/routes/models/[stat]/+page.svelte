@@ -109,7 +109,7 @@
         multipliers. Points, rebounds, and assists share one minutes distribution. Once the minutes
         are fixed, the rates are separate. The chance at a line is that sum. The saved fit did not
         see the last 20% of dates. Those dates are the test, next to each player's last-10 total.
-        A game clears a line when the stat is at or above it. There is no odds feed.
+        A game clears a line when the stat is at or above it.
       </p>
     {:else}
       <p>
@@ -120,7 +120,7 @@
         last 10, and last 20 mix in a second rate. The weight on it is how much those games look
         like a real change. The season window uses the season rate. The saved fit did not see the
         last 20% of dates. Those dates are the test, next to each player's last-10 total. A game
-        clears a line when the stat is at or above it. There is no odds feed.
+        clears a line when the stat is at or above it.
       </p>
     {/if}
   </section>

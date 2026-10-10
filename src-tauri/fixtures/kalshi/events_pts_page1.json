@@ -1,0 +1,58 @@
+{
+    "cursor": "CgYI0Omh1gYSFktYTkJBUFRTLTI2T0NUMDhCT1NDTEU",
+    "events": [
+        {
+            "category": "Sports",
+            "collateral_return_type": "",
+            "event_ticker": "KXNBAPTS-26OCT08PHIBKN",
+            "exchange_index": 3,
+            "last_updated_ts": "2026-10-09T02:40:48.415184Z",
+            "mutually_exclusive": false,
+            "product_metadata": {
+                "competition": "Pro Basketball (M) Preseason",
+                "competition_scope": "Player Points"
+            },
+            "series_ticker": "KXNBAPTS",
+            "settlement_sources": [
+                {
+                    "name": "the Governing League",
+                    "url": "https://www.nba.com"
+                },
+                {
+                    "name": "ESPN",
+                    "url": "https://www.espn.com"
+                }
+            ],
+            "strike_period": "",
+            "sub_title": "PHI vs BKN (Oct 8)",
+            "title": "Philadelphia vs Brooklyn: Points"
+        },
+        {
+            "category": "Sports",
+            "collateral_return_type": "",
+            "event_ticker": "KXNBAPTS-26OCT08BOSCLE",
+            "exchange_index": 3,
+            "last_updated_ts": "2026-10-09T02:02:17.666334Z",
+            "mutually_exclusive": false,
+            "product_metadata": {
+                "competition": "Pro Basketball (M) Preseason",
+                "competition_scope": "Player Points"
+            },
+            "series_ticker": "KXNBAPTS",
+            "settlement_sources": [
+                {
+                    "name": "the Governing League",
+                    "url": "https://www.nba.com"
+                },
+                {
+                    "name": "ESPN",
+                    "url": "https://www.espn.com"
+                }
+            ],
+            "strike_period": "",
+            "sub_title": "BOS vs CLE (Oct 8)",
+            "title": "Boston vs Cleveland: Points"
+        }
+    ],
+    "milestones": []
+}

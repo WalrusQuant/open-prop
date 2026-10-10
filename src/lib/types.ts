@@ -239,3 +239,37 @@ export interface Prediction {
   /** Set while last season's carry outweighs this season's games. */
   priorFrom: string | null;
 }
+
+/** One stored Kalshi rung: yes pays when the stat is at least `threshold`. Prices are 0 to 1. */
+export interface KalshiQuote {
+  marketTicker: string;
+  eventTicker: string;
+  stat: string;
+  playerName: string;
+  team: string | null;
+  /** NBA.com id, or null when the name did not match the roster. */
+  playerId: number | null;
+  threshold: number;
+  yesBid: number | null;
+  yesAsk: number | null;
+  mid: number | null;
+  spread: number | null;
+  volume: number;
+  openInterest: number;
+  thin: boolean;
+  gameTime: string | null;
+}
+
+export interface KalshiQuotes {
+  pulledAt: string | null;
+  rows: KalshiQuote[];
+}
+
+export interface KalshiRefresh {
+  pulledAt: string;
+  events: number;
+  requests: number;
+  quotes: number;
+  matched: number;
+  unmatched: { name: string; team: string | null; stat: string }[];
+}

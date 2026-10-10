@@ -2,6 +2,7 @@
   import { goto } from "$app/navigation";
   import { page } from "$app/stores";
   import Distribution from "$lib/components/Distribution.svelte";
+  import KalshiLadder from "$lib/components/KalshiLadder.svelte";
   import PlayerSearch from "$lib/components/PlayerSearch.svelte";
   import Prediction from "$lib/components/Prediction.svelte";
   import TrendChart from "$lib/components/TrendChart.svelte";
@@ -402,6 +403,7 @@
         mean={projection?.mean ?? null}
         pmf={projection?.pmf ?? null}
       />
+      <KalshiLadder {playerId} {stat} statLabel={report.statLabel} pmf={projection?.pmf ?? null} />
     </section>
 
     <section class="room trend-room">

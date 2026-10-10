@@ -107,6 +107,7 @@ fn init(connection: &Connection) -> AppResult<()> {
     connection.pragma_update(None, "foreign_keys", "ON")?;
     connection.pragma_update(None, "busy_timeout", "5000")?;
     connection.execute_batch(SCHEMA)?;
+    crate::odds::store::init(connection)?;
     Ok(())
 }
 

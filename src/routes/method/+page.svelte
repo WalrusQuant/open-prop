@@ -10,7 +10,7 @@
   <p>
     A game clears the line when the stat is greater than or equal to it. A 26 against 26 counts.
     Combo props are box-score sums: points and assists, points and rebounds, rebounds and assists,
-    and all three. There is no odds feed. The line is the number you set. Median fills it from the
+    and all three. The line is the number you set. Median fills it from the
     games in the window until you type a different number.
   </p>
   <p>
@@ -115,7 +115,11 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     An earlier version drew one minute total and scaled points, rebounds, and assists by that same
     number. The rates here are separate once the minutes are known. The shared piece is only the
     minutes. An earlier fit was a tree. A file from that fit will not load. Refit the season on the
-    home page. Betting odds, implied probability, and an edge against a book are not in this app.
+    home page. The only price in the app is Kalshi's public prop market. A Kalshi rung such as 25+
+    points is a yes/no contract, so its ask is a probability. The edge shown is the model's chance of
+    that many or more minus the yes ask, before Kalshi's fee, and the mid is shown as the market's own
+    estimate. Thin rungs are greyed out. There is no Kalshi market for turnovers, field goals made, or
+    field goals attempted.
   </p>
 
   <h2>The rows</h2>

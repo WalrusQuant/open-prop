@@ -1,8 +1,8 @@
 # Open Prop
 
-Open Prop is a desktop app for NBA game logs. It shows how often a player cleared a number you pick, and it fits one rate-per-minute model per stat for the season. The model is there so you can read a probability and change the priors. It does not claim an edge against a book.
+Open Prop is a desktop app for NBA game logs. It shows how often a player cleared a number you pick, and it fits one rate-per-minute model per stat for the season. The model is there so you can read a probability and change the priors. Next to it, the app can read Kalshi's public NBA prop markets, free and with no key, and show the gap between the model and Kalshi's price.
 
-There is no odds feed, no American price, no implied probability, and no edge. A line is just the number you typed.
+The only odds source is Kalshi, and only where Kalshi lists a market. A Kalshi rung like "25+ points" is a yes/no contract, so its price is already a probability. The edge is the model's chance of that many or more minus the yes ask, before Kalshi's fee. Everywhere else a line is just the number you typed. The app reads public market data only. It never asks for a Kalshi key and never trades.
 
 [Watch a one-minute demo](docs/demo.mp4).
 
@@ -23,6 +23,8 @@ Home is the cache and the models. It shows how many games are stored, when they 
 The player page is one player and one stat. You set the number being checked. Last 5, last 10, last 20, and the season are scored against that same number. The model card is the chance of that many or more for a spot you name: opponent, home or away, days of rest, and minutes. Leave the opponent blank for a league-average opponent. Leave minutes blank and the model uses a minutes distribution. Type minutes and that distribution collapses to the number you typed. The distribution chart draws the model's probabilities from zero up, next to the games in the selected window. Changing the number sums a tail that is already on the page. It does not ask the model again. Changing the player, the stat, the window, or the spot does.
 
 The board is the short list. Pick a stat and a number. It keeps players who cleared that number in at least 70% of their last 10, with at least 8 games in that window and 10 games on the season. You can drop the floor to 60% or 80%, or show everyone and search. A row opens that player.
+
+Kalshi is a column on the board and a ladder on the player page. Press Refresh Kalshi to read the open NBA props. The board shows the yes ask and the mid for the rung at your number. The player page lists every rung for that player and stat with the model's chance, bid, ask, mid, and the edge for yes and for no. Grey rows are thin: one side is empty, the spread is wider than 10¢, or fewer than 100 contracts traded. Kalshi has no market for turnovers, field goals made, or field goals attempted, and not every game gets props, so those read "no market". Names are matched to NBA.com ids by name and team; names that do not match are listed after a refresh.
 
 Method is the counting rules and the model, written out. It is not a second board.
 

@@ -1,0 +1,54 @@
+{
+    "cursor": "CgYIuMC40QYSFktYTkJBUFRTLTI2SlVOMTNOWUtTQVM",
+    "events": [
+        {
+            "category": "Sports",
+            "collateral_return_type": "",
+            "event_ticker": "KXNBAPTS-26OCT05NYKPHI",
+            "exchange_index": 3,
+            "last_updated_ts": "2026-10-05T15:06:29.129147Z",
+            "mutually_exclusive": false,
+            "product_metadata": {
+                "competition": "Pro Basketball (M) Preseason",
+                "competition_scope": "Player Points"
+            },
+            "series_ticker": "KXNBAPTS",
+            "settlement_sources": [
+                {
+                    "name": "the Governing League",
+                    "url": "https://www.nba.com"
+                },
+                {
+                    "name": "ESPN",
+                    "url": "https://www.espn.com"
+                }
+            ],
+            "strike_period": "",
+            "sub_title": "NYK vs PHI (Oct 5)",
+            "title": "New York vs Philadelphia: Points"
+        },
+        {
+            "category": "Sports",
+            "collateral_return_type": "",
+            "event_ticker": "KXNBAPTS-26JUN13NYKSAS",
+            "exchange_index": 0,
+            "last_updated_ts": "2026-08-28T20:47:35.727997Z",
+            "mutually_exclusive": false,
+            "product_metadata": {
+                "competition": "Pro Basketball (M)",
+                "competition_scope": "Player Points"
+            },
+            "series_ticker": "KXNBAPTS",
+            "settlement_sources": [
+                {
+                    "name": "the Governing League",
+                    "url": "https://www.nba.com"
+                }
+            ],
+            "strike_period": "",
+            "sub_title": "NYK vs SAS (Jun 13)",
+            "title": "New York at San Antonio: Points"
+        }
+    ],
+    "milestones": []
+}
