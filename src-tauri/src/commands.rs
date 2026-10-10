@@ -16,6 +16,10 @@ use crate::models::{
     TrendReport, Window,
 };
 use crate::nba::NbaClient;
+use crate::odds::kalshi::KalshiProvider;
+use crate::odds::matching::Matcher;
+use crate::odds::store::{self as odds_store, StoredQuote};
+use crate::odds::OddsProvider;
 use crate::season::{self, SEASON_TYPES};
 use crate::stats;
 
@@ -25,6 +29,9 @@ pub struct AppState {
     pub syncing: AtomicBool,
     /// Held for a whole fit, so a second train from any page is turned away.
     pub training: AtomicBool,
+    /// Held for one Kalshi pull, so a second refresh is turned away.
+    pub odds_pulling: AtomicBool,
+    pub kalshi: KalshiProvider,
     pub models_dir: PathBuf,
     pub spec_dirs: Vec<PathBuf>,
     fitted: ModelCache<Fitted>,
@@ -877,15 +884,131 @@ pub fn build_state(connection: Connection, data_dir: &Path) -> Result<AppState, 
         nba: NbaClient::new()?,
         syncing: AtomicBool::new(false),
         training: AtomicBool::new(false),
+        odds_pulling: AtomicBool::new(false),
+        kalshi: KalshiProvider::new()?,
         models_dir,
         spec_dirs: engine::spec_dirs(data_dir),
         fitted: ModelCache::new(),
     })
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UnmatchedPlayer {
+    pub name: String,
+    pub team: Option<String>,
+    pub stat: String,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KalshiRefresh {
+    pub pulled_at: String,
+    pub events: usize,
+    pub requests: usize,
+    pub quotes: usize,
+    pub matched: usize,
+    pub unmatched: Vec<UnmatchedPlayer>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KalshiQuotes {
+    pub pulled_at: Option<String>,
+    pub rows: Vec<StoredQuote>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KalshiQuery {
+    pub stat: Option<String>,
+    pub player_id: Option<i64>,
+}
+
+/// Matches each quote to an NBA.com id with the stored roster for `season`, and lists the
+/// names that did not match once per player and stat.
+fn match_quotes(roster: &[RosterEntry], quotes: &[crate::odds::Quote]) -> (Vec<Option<i64>>, Vec<UnmatchedPlayer>) {
+    let matcher = Matcher::new(roster);
+    let mut unmatched: Vec<UnmatchedPlayer> = Vec::new();
+    let ids = quotes
+        .iter()
+        .map(|quote| {
+            let id = matcher.find(&quote.player_name, quote.team.as_deref());
+            if id.is_none()
+                && !unmatched
+                    .iter()
+                    .any(|row| row.name == quote.player_name && row.stat == quote.stat)
+            {
+                unmatched.push(UnmatchedPlayer {
+                    name: quote.player_name.clone(),
+                    team: quote.team.clone(),
+                    stat: quote.stat.clone(),
+                });
+            }
+            id
+        })
+        .collect();
+    (ids, unmatched)
+}
+
+/// Pulls Kalshi's open NBA props with no key, then writes them in one short transaction.
+/// The network work runs before the database lock is taken.
+#[tauri::command]
+pub async fn kalshi_refresh(state: State<'_, AppState>, season: String) -> Result<KalshiRefresh, String> {
+    let season = season::validate_season(&season).map_err(show)?;
+    let state = state.inner();
+    let _guard = enter(&state.odds_pulling, "Kalshi is already being read.")?;
+    // Public market data only: this provider never takes or stores a key.
+    debug_assert!(!state.kalshi.needs_key());
+    let pull = state.kalshi.pull(Utc::now()).await.map_err(show)?;
+    let pulled_at = Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
+    let db = Arc::clone(&state.db);
+    let stamp = pulled_at.clone();
+    let (matched, unmatched, quotes) = read_db(db, move |connection| {
+        let roster = db::roster(connection, &season).map_err(show)?;
+        let (ids, unmatched) = match_quotes(&roster, &pull.quotes);
+        odds_store::save_pull(connection, &stamp, &pull.quotes, &ids).map_err(show)?;
+        Ok((ids.iter().filter(|id| id.is_some()).count(), unmatched, pull.quotes.len()))
+    })
+    .await?;
+    Ok(KalshiRefresh {
+        pulled_at,
+        events: pull.events,
+        requests: pull.requests,
+        quotes,
+        matched,
+        unmatched,
+    })
+}
+
+/// The newest stored Kalshi pull, for the Board column and the Player ladder.
+#[tauri::command]
+pub async fn kalshi_quotes(state: State<'_, AppState>, query: KalshiQuery) -> Result<KalshiQuotes, String> {
+    let book = state.kalshi.id();
+    let db = Arc::clone(&state.db);
+    read_db(db, move |connection| {
+        let (pulled_at, rows) =
+            odds_store::latest(connection, book, query.stat.as_deref(), query.player_id).map_err(show)?;
+        Ok(KalshiQuotes { pulled_at, rows })
+    })
+    .await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn kalshi_quotes_match_by_name_and_team_and_list_the_rest() {
+        let body: serde_json::Value = serde_json::from_str(include_str!("../fixtures/kalshi/markets_pts_bos_cle_settled.json")).unwrap();
+        let quotes = crate::odds::kalshi::parse_markets(&body, "points");
+        let roster = vec![RosterEntry { player_id: 1628369, name: "Jayson Tatum".into(), team_abbr: "BOS".into() }];
+        let (ids, unmatched) = match_quotes(&roster, &quotes);
+        assert_eq!(ids.iter().filter(|id| **id == Some(1628369)).count(), 4);
+        assert_eq!(unmatched.len(), 1, "one entry per player and stat");
+        assert_eq!(unmatched[0].name, "Paul George");
+        assert_eq!(unmatched[0].team.as_deref(), Some("BOS"));
+    }
 
     fn log(id: i64, team: &str, date: &str, pts: i32) -> GameLog {
         GameLog {

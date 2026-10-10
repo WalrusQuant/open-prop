@@ -2,7 +2,9 @@
   import { goto } from "$app/navigation";
   import { errorText, loadBoard } from "$lib/api";
   import { defaultLine, statShort } from "$lib/catalog";
-  import { formatLine, formatStat } from "$lib/format";
+  import { formatLine, formatStat, formatWhen } from "$lib/format";
+  import { cents, kalshiLists, rungAt } from "$lib/kalshi";
+  import { kalshi, loadKalshiRows, pullKalshi } from "$lib/kalshi.svelte";
   import { currentStatus, session, syncCurrent } from "$lib/session.svelte";
   import { INPUT_DELAY_MS, later } from "$lib/timing";
   import type { BoardRow, BoardSplit } from "$lib/types";
@@ -36,6 +38,19 @@
       return row.last10.overs / row.last10.games >= floor.rate;
     });
   });
+
+  let listed = $derived(kalshiLists(stat));
+
+  $effect(() => {
+    if (!kalshi.loaded) void loadKalshiRows();
+  });
+
+  function kalshiCell(row: BoardRow): { text: string; note: string; thin: boolean } {
+    if (!listed) return { text: "no market", note: "", thin: false };
+    const rung = rungAt(kalshi.rows, row.playerId, stat, Number.isFinite(line) ? line : 0);
+    if (!rung) return { text: "no market", note: "", thin: false };
+    return { text: cents(rung.yesAsk), note: `mid ${cents(rung.mid)}`, thin: rung.thin };
+  }
 
   $effect(() => {
     if (!session.ready || !synced) {
@@ -103,6 +118,20 @@
     <h1>Board</h1>
     <p>Who cleared the line. Sorted by the last 10.</p>
   </div>
+  <div class="kalshi-head">
+    <button type="button" onclick={() => pullKalshi(session.season)} disabled={kalshi.pulling}>
+      {kalshi.pulling ? "Reading Kalshi…" : "Refresh Kalshi"}
+    </button>
+    <span>
+      {kalshi.pulledAt ? `Kalshi read ${formatWhen(kalshi.pulledAt)}` : "Kalshi not read yet"}{kalshi.last &&
+      kalshi.last.unmatched.length > 0
+        ? ` · ${kalshi.last.unmatched.length} unmatched: ${kalshi.last.unmatched
+            .slice(0, 5)
+            .map((item) => item.name)
+            .join(", ")}${kalshi.last.unmatched.length > 5 ? "…" : ""}`
+        : ""}
+    </span>
+  </div>
 </header>
 
 {#if !synced}
@@ -143,6 +172,9 @@
   {#if boardError}
     <p class="banner bad">{boardError}</p>
   {/if}
+  {#if kalshi.error}
+    <p class="banner bad">{kalshi.error}</p>
+  {/if}
   {#if shown.length === 0 && !loading}
     <p class="waiting">
       {#if floor.rate > 0}
@@ -171,10 +203,12 @@
             <th>L20</th>
             <th>Season</th>
             <th>Mean</th>
+            <th title="Kalshi yes ask for {formatLine(line)}+ (free public data). Mid is the reference.">Kalshi {formatLine(line)}+</th>
           </tr>
         </thead>
         <tbody>
           {#each shown as row (row.playerId)}
+            {@const cell = kalshiCell(row)}
             <tr>
               <td class="left">
                 <button type="button" class="link" onclick={() => openPlayer(row.playerId)}>{row.name}</button>
@@ -188,6 +222,9 @@
                 <span>{row.season.overs}/{row.season.games}{row.dnp > 0 ? ` · ${row.dnp} DNP` : ""}</span>
               </td>
               <td>{formatStat(row.mean)}</td>
+              <td class="rate kalshi" class:thin={cell.thin} title={cell.thin ? "Thin market: empty side, wide spread, or little volume." : ""}>
+                <strong>{cell.text}</strong>{#if cell.note}<span>{cell.note}</span>{/if}
+              </td>
             </tr>
           {/each}
         </tbody>
@@ -195,3 +232,15 @@
     </div>
   {/if}
 {/if}
+
+<style>
+  .kalshi-head {
+    display: flex;
+    gap: 0.75rem;
+    align-items: center;
+    font-size: 0.85rem;
+  }
+  td.kalshi.thin {
+    opacity: 0.45;
+  }
+</style>

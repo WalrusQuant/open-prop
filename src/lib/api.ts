@@ -6,6 +6,8 @@ import {
 } from "./preview";
 import type {
   BoardQuery,
+  KalshiQuotes,
+  KalshiRefresh,
   BoardRow,
   Bootstrap,
   PlayerOption,
@@ -66,6 +68,17 @@ export async function loadModelScores(query: TrainQuery): Promise<TrainStatRepor
 export async function loadPrediction(query: PredictQuery): Promise<Prediction> {
   if (!inTauri()) throw new Error("Train runs in the desktop app.");
   return command<Prediction>("predict", { query });
+}
+
+/** Reads Kalshi's open NBA props. Public data, no key, nothing is traded. */
+export async function refreshKalshi(season: string): Promise<KalshiRefresh> {
+  if (!inTauri()) throw new Error("Kalshi prices load in the desktop app.");
+  return command<KalshiRefresh>("kalshi_refresh", { season });
+}
+
+export async function loadKalshi(stat: string | null = null, playerId: number | null = null): Promise<KalshiQuotes> {
+  if (!inTauri()) return { pulledAt: null, rows: [] };
+  return command<KalshiQuotes>("kalshi_quotes", { query: { stat, playerId } });
 }
 
 export function errorText(error: unknown): string {

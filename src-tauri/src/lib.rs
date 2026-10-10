@@ -4,6 +4,7 @@ mod engine;
 mod error;
 mod models;
 mod nba;
+mod odds;
 mod season;
 mod stats;
 
@@ -67,7 +68,9 @@ pub fn run() {
             commands::leaderboard,
             commands::train_models,
             commands::predict,
-            commands::model_scores
+            commands::model_scores,
+            commands::kalshi_refresh,
+            commands::kalshi_quotes
         ])
         .run(tauri::generate_context!())
         .expect("Open Prop failed to start");

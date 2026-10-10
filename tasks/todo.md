@@ -98,4 +98,7 @@ Branch `cross-season-prior`. Plan and backtest results in [`plan-cross-season-pr
 - [x] Read commands run off the UI thread (`spawn_blocking`); sync fetches before it locks the database.
 - [x] Rookie prior from draft position: backtested on `rookie-prior`; **not shipped** (draft×role lost to role prior). Five-game wait stays. `sync-draft` + `backtest-rookie` available.
 - [x] League drift: backtested; **not shipped** (mixed/tiny).
+- [x] Kalshi Phase 1 (`kalshi-provider`): `OddsProvider` trait, `KalshiProvider` (public `/events` + `/markets`, cursor paging, pregame filter), `odds_snapshots` with `book = kalshi`, name + team match to NBA.com ids with unmatched names listed, `kalshi_refresh` / `kalshi_quotes`, Board column, Player ladder, edge = model P(≥X) − yes ask.
+- [ ] Kalshi: confirm regular-season props once they list (week of Oct 12–19), tune the thin thresholds, and check Kalshi's team codes against NBA abbreviations.
+- [ ] Kalshi polling setting (manual refresh only for now).
 - [ ] Clicked through in the browser preview only, not in the Tauri webview.
