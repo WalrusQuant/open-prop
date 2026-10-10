@@ -1,8 +1,8 @@
-# Plan: player-prop odds feed (The Odds API)
+# Plan: player-prop odds feed (Kalshi + The Odds API)
 
 **Status:** plan only — no implementation in this PR.  
 **App:** open-prop (Tauri 2 + SvelteKit, no backend/daemon). Main at `6daa2db` when drafted; decisions below from Adam on PR #7.  
-**Provider:** [The Odds API](https://the-odds-api.com/) v4.
+**Providers:** behind an `OddsProvider` trait — **Kalshi** (free, built in, no key, no credits; the out-of-the-box default) and **[The Odds API](https://the-odds-api.com/) v4** (paid, user's own key; sportsbook + DFS + exchanges). Kalshi added with Adam's approval, Oct 9 2026; sections 3–8 below are The Odds API and unchanged.
 
 Odds are pulled when the app opens, the user refreshes, or (optional) a user-chosen poll interval fires **while the app is open**. There is no daemon. Line history is whatever snapshots the app stored under `pulled_at`.
 
@@ -19,6 +19,89 @@ Odds are pulled when the app opens, the user refreshes, or (optional) a user-cho
 | API key | Settings page → file in Tauri app data dir, mode **0600**, masked UI; **no** OS keychain |
 | Refresh | Manual default; optional recurring poll with min interval, credit guard, app-open only |
 | Games | **Pregame only** — drop events with `commence_time` ≤ now |
+| Kalshi (Oct 9 2026) | Add Kalshi as a free built-in provider and the default; The Odds API stays as the paid, opt-in provider |
+
+---
+
+## 0. Provider architecture (`OddsProvider`)
+
+```rust
+trait OddsProvider {
+    fn id(&self) -> &'static str;              // "kalshi" | "the_odds_api"
+    fn needs_key(&self) -> bool;               // kalshi: false
+    fn estimate_cost(&self, slate: &Slate) -> Cost; // kalshi: Cost::Free
+    async fn pull(&self, slate: &Slate) -> AppResult<Vec<Quote>>; // pregame only
+}
+```
+
+- `Quote` is the normalized row written to `odds_snapshots` (section 9): event, player name + team, our stat key, threshold or line, side, price fields, `book`, `book_kind`, `pulled_at`.
+- **Kalshi** is always on and needs no setup. **The Odds API** is enabled only when the user saves a key (sections 3–8 unchanged).
+- One refresh runs every enabled provider. Each provider's failure is shown separately; one failing never blocks the other.
+
+---
+
+## 0b. Kalshi provider (free, default)
+
+Survey run Oct 9 2026 against the public API `https://api.elections.kalshi.com/trade-api/v2` (`/series`, `/events`, `/markets`). Build waits for regular-season props (week of Oct 12–19).
+
+### Series and coverage
+
+| Series | open-prop stat | Observed |
+|---|---|---|
+| `KXNBAPTS` | PTS | Listed through the 2026 playoffs and for preseason games Oct 5 and Oct 8 |
+| `KXNBAREB` | REB | Listed through the 2026 playoffs |
+| `KXNBAAST` | AST | Listed through the 2026 playoffs |
+| `KXNBA3PT` | 3PM | Listed through the 2026 playoffs |
+| `KXNBASTL` | STL | Listed through the 2026 playoffs |
+| `KXNBABLK` | BLK | Listed through the 2026 playoffs |
+| `KXNBAFTM` | FTM | Occasional (7 events ever, Finals only) |
+| `KXNBAPRA`, `KXNBAPA`, `KXNBAPR`, `KXNBARA` | PRA, P+A, P+R, R+A | Series exist but have **never** listed an event; poll them anyway |
+| — | TOV, FGM, FGA | No Kalshi series; show "no Kalshi market" |
+
+Game lines (`KXNBAGAME`, `KXNBASPREAD`, `KXNBATOTAL`) exist but aren't used by the prop board. On Oct 9 no prop markets were open; `KXNBAGAME` had 84 open markets across 42 games.
+
+### Market structure → model
+
+- One event per game per stat (for example `KXNBAPTS-26OCT08BOSCLE`), holding a yes/no **ladder** per player: ticker `…-BOSJTATUM0-25`, title `Jayson Tatum: 25+ points`, `floor_strike` 24.5, `strike_type` `greater`.
+- Yes means stat ≥ ceil(`floor_strike`). That maps **directly** to the model's NB P(stat ≥ X), with X = `floor_strike` + 0.5. No devig and no half-point logic.
+- Accept only `strike_type = greater`; skip and log anything else.
+
+### Price and edge
+
+- Store `yes_bid`, `yes_ask` (from the `*_dollars` string fields, 0–1), `volume_fp`, `open_interest_fp`, `close_time`.
+- **Edge = model P(≥ X) − yes ask** (the price you would pay). Show **mid** = (bid + ask) / 2 as the market's probability reference.
+- "No" side: edge = (1 − model P) − no ask, where no ask = 1 − yes bid.
+- **Thin-market flag:** low `volume_fp`, missing bid or ask, or a wide spread (ask − bid). Thresholds get tuned from Phase 1 fixtures. Flagged rows are shown greyed out and excluded from "best edge" sorting.
+- **Fees (unverified):** Kalshi's taker fee is believed to scale with P × (1 − P) per contract. I couldn't confirm the current schedule, so v1 shows edge before fees with a note. The tooltip links to Kalshi's fee page.
+
+### Player matching
+
+- Titles carry the full player name ("Paul George: 25+ points"), and the ticker carries a team code plus a short-name ID (`BOSPGEORGE13`).
+- Match on **name + team** using the section 12 pipeline (normalize → team-scoped exact → high-threshold fuzzy → `odds_player_map`). The team comes from the ticker prefix.
+
+### Call pattern per slate
+
+1. For each prop series, call `GET /events?series_ticker=<S>&status=open`, following `cursor` until it comes back empty.
+2. For each pregame event, call `GET /markets?event_ticker=<E>`, also paginated with `cursor`.
+3. That's about 11 + N calls per slate. It's free, but keep the existing manual-refresh default and poll minimum, and throttle client-side, with backoff on HTTP 429.
+4. Drop events whose `close_time` or game start has passed (pregame only, same rule as the Odds API).
+
+### Storage
+
+- Same `odds_snapshots` table keyed by `pulled_at`, with `bookmaker_key = 'kalshi'`, `book_kind = 'exchange'`, `market_key` = our stat key, `point` = threshold X, `name` = `yes`/`no`.
+- Price fields: store yes ask as `price` (probability, `odds_format = 'prob'`) plus `bid`, `ask`, `volume` and `open_interest` columns (see section 9).
+- Kalshi pulls don't write `odds_quota_log` credit fields; they log HTTP status only.
+
+### Auth
+
+- All of the reads above are **unauthenticated**. The Kalshi provider uses no key.
+- Never read, copy or store any user Kalshi API key for this feature, and never place orders. open-prop is read-only.
+
+### Caveats
+
+- Not every game gets props (on Oct 9, MEM@CHI had game lines but no props). Show "no Kalshi market" instead of hiding the game.
+- Ladder steps are coarse (5-point steps for points). Compare at Kalshi's thresholds, not at sportsbook lines.
+- Combo series have never listed, so coverage beyond 6 or 7 stats is unproven until the regular season.
 
 ---
 
@@ -262,6 +345,10 @@ CREATE TABLE odds_snapshots (
   odds_format TEXT NOT NULL,
   point REAL,
   bookmaker_last_update TEXT,
+  bid REAL,                        -- kalshi yes bid (0–1)
+  ask REAL,                        -- kalshi yes ask (0–1)
+  volume REAL,                     -- kalshi volume_fp
+  open_interest REAL,              -- kalshi open_interest_fp
   UNIQUE (pulled_at, event_id, bookmaker_key, market_key, player_name, name, point)
 );
 
@@ -291,15 +378,21 @@ App settings (toggles, poll interval, threshold) can live in a small `odds_setti
 
 - `src-tauri/src/odds.rs` + commands: `odds_status`, `odds_set_key`, `odds_clear_key`, `odds_test_key`, `odds_refresh`, `odds_for_board`, `odds_for_player`, `odds_estimate`.  
 - Async + `spawn_blocking` for DB (same as existing reads).  
-- Board: line, prices by kind, fair % (sportsbooks), model %, edge %, stale age, FGA never shows odds.  
-- Player: book line, “Use book line,” sparkline from snapshots.  
+- Board: **Kalshi is its own column/source** (yes ask, mid, edge vs ask, thin flag; nearest ladder threshold to the model line), shown with no setup. Odds API books appear next to it when a key is set: line, prices by kind, fair % (sportsbooks), model %, edge %, stale age, FGA never shows odds.  
+- Player: Kalshi ladder table (each X+ threshold: model P(≥X), yes bid/ask, mid, edge) plus book line, “Use book line,” sparkline from snapshots.  
 - Home/Settings: masked key, toggles, estimate, remaining credits, poll controls.
 
 ---
 
 ## 11. Phased rollout (updated)
 
-### Phase 1 — Core feed
+### Phase 1 — `OddsProvider` trait + Kalshi (free) — build week of Oct 12–19, once regular-season markets confirm
+
+- Trait + normalized `Quote`; Kalshi provider (no key, no credits) as default.  
+- Snapshots with `book = kalshi`; Kalshi Board column + Player ladder; thin flags; name + team match.  
+- Recorded Kalshi fixtures; no network in tests.
+
+### Phase 2 — The Odds API core feed
 
 - Key file (0600) + Settings (markets, regions, estimate, poll, guard).  
 - Pregame events + event-odds for all **enabled** documented markets × regions.  
@@ -309,13 +402,13 @@ App settings (toggles, poll interval, threshold) can live in a small `odds_setti
 - FGA: no odds affordance.  
 - Fixture tests; no live key in CI.
 
-### Phase 2 — History + DFS/exchange presentation
+### Phase 3 — History + DFS/exchange presentation
 
 - Sparklines / line moved since first pull.  
 - DFS indicative labeling; exchange back-price handling from fixtures.  
 - Credit dashboard (pulls today, projected month).
 
-### Phase 3 — Alternates
+### Phase 4 — Alternates
 
 - `*_alternate` toggles; alt-line picker; edge across lines.
 
@@ -331,7 +424,9 @@ Unchanged: normalize → roster/team-scoped exact → high-threshold fuzzy → `
 
 - Redacted fixtures for `us` sportsbook props, and separate fixtures for `us_dfs` / `us_ex` once captured.  
 - Tests: parse, credit estimator (markets × regions × games), pregame filter, multiplicative devig, DFS “no false devig,” budget guard, TTL/poll min.  
-- No API keys in repo.
+- **Kalshi fixtures** (recorded, unauthenticated): an `/events` page with a `cursor`, a `/markets` ladder for the settled `KXNBAPTS-26OCT08BOSCLE` (for example `…-BOSPGEORGE13-25`, `floor_strike` 24.5, `strike_type` greater), an empty-series response (combo series), and a game with no props.  
+- Kalshi tests: ticker/title parse → player + team + X; X = floor_strike + 0.5 maps to model P(≥X); edge vs ask, mid, no-side math; thin-market flags; pregame filter; pagination; non-`greater` strike skipped.  
+- No API keys in repo (Kalshi needs none).
 
 ---
 
@@ -350,7 +445,8 @@ Unchanged: normalize → roster/team-scoped exact → high-threshold fuzzy → `
 
 | Choice | Locked recommendation |
 |---|---|
-| Tier | **$59 / 100K** |
+| Default provider | **Kalshi**, free, no key, read-only; PTS/REB/AST/3PM/STL/BLK (+ occasional FTM) |
+| Tier (Odds API) | **$59 / 100K** |
 | Regions | **`us`, `us2`, `us_dfs`, `us_ex`** (toggleable; all on by default) |
 | Markets | All **13** documented mappings (toggleable); **FGA = no odds** |
 | Full-slate cost | **13 × 4 × 10 = 520 credits/pull** if everything returns |
