@@ -63,7 +63,7 @@ The player page can export the games in the window as CSV.
 
 ## The model
 
-Train once per stat per season, from the home page. Each counting stat is a rate per minute with a gamma prior. The probability at a number is the negative binomial that prior implies: wider when the expected total is higher, and never below zero. A line of 12.5 means 13 or more, because the predictive is a count. Blocks and steals keep their zeros in that same distribution. The percent at a line is that distribution, summed from the line up. The usual range is the middle 80% of it.
+Train once per stat per season, from the home page. Each counting stat is a rate per minute with a gamma prior. The probability at a number is the negative binomial that prior implies: wider when the expected total is higher, and never below zero. A line of 12.5 means 13 or more, because the predictive is a count. Blocks and steals keep their zeros in that same distribution. The percent at a line is that distribution, summed from the line up. The usual range is the middle 80% of it. For points only, that distribution is then stretched about 15% around its middle, and a 5% chance of a short night at about a third of normal scoring is mixed in. A backtest against last season's Kalshi points prices showed the plain version was too sure of itself.
 
 A short sample shrinks toward players in a similar minutes role. The shipped cuts are under 15 minutes, 15 to 28, and 28 or more. Each opponent has its own multiplier, fit with the rates. Home and an extra day of rest are two more multipliers. Their priors are tight, so the effects stay small unless the games support them. A blank opponent is a multiplier of 1. An opponent abbreviation that never appeared in the cache is an error.
 

@@ -50,7 +50,10 @@ margin = z √(p(1 − p) / n + z² / 4n²) / (1 + z² / n)</pre>
     Each counting stat is a rate per minute with a gamma prior. The percent at a line is the
     negative binomial that prior implies, summed from the line upward. It is wider when the
     expected total is higher, and it cannot go below zero. A line of 12.5 means 13 or more. The
-    middle 80% of the same distribution is the usual range.
+    middle 80% of the same distribution is the usual range. For points only, that distribution
+    is stretched about 15% around its middle, and a 5% chance of a short night at about a third
+    of normal scoring is mixed in, because the plain version was too sure of itself against last
+    season's Kalshi points prices.
   </p>
   <p>
     The rate shrinks toward players in a similar minutes role. Each opponent has a multiplier fit

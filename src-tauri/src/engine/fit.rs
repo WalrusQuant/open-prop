@@ -11,7 +11,9 @@ use crate::error::{AppError, AppResult};
 use crate::models::{GameLog, Stat};
 use crate::stats::split_matchup;
 
-use super::bayes::{self, at_least, band, convolve, mean, minute_nodes, scale_mix, std_dev};
+use super::bayes::{
+    self, at_least, band, convolve, mean, minute_nodes, scale_mix, short_night, std_dev, widen,
+};
 use super::spec::{validate, ModelSpec};
 
 pub mod backtest;
@@ -1062,6 +1064,27 @@ fn last_totals(history: &[Obs], count: usize) -> f64 {
     slice.iter().map(|row| row.stat).sum::<f64>() / slice.len() as f64
 }
 
+/// Points only. The October 2026 walk-forward against Kalshi points props found real results
+/// landing about 1.34 times farther from the mean (squared) than the predictive allowed, and
+/// 4.7% of games at 3 or fewer points against 2.3% predicted. These stretch the points
+/// predictive about 15% around its mean and mix in a 5% short night at about a third of
+/// normal scoring. Other stats keep 1.0 and 0.0 until they have their own test.
+pub const POINTS_SPREAD_FACTOR: f64 = 1.15;
+pub const POINTS_SHORT_NIGHT_WEIGHT: f64 = 0.05;
+pub const POINTS_SHORT_NIGHT_SCALE: f64 = 0.35;
+
+/// Applies the points spread and short-night settings to a single-part points predictive.
+fn adjust_tail(parts: &[Population], pmf: Vec<f64>) -> Vec<f64> {
+    match parts {
+        [only] if only.stat == "points" => short_night(
+            &widen(&pmf, POINTS_SPREAD_FACTOR),
+            POINTS_SHORT_NIGHT_WEIGHT,
+            POINTS_SHORT_NIGHT_SCALE,
+        ),
+        _ => pmf,
+    }
+}
+
 fn combine(
     parts: &[Population],
     histories: &[Vec<Obs>],
@@ -1112,7 +1135,7 @@ fn combine(
             weight_total += weight;
         }
     }
-    let pmf = scale_mix(&weighted, &weights);
+    let pmf = adjust_tail(parts, scale_mix(&weighted, &weights));
     let (low, high) = band(&pmf);
     Forecast {
         sigma: std_dev(&pmf),
